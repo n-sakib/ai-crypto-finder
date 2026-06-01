@@ -1,0 +1,141 @@
+# ── Telegram Discovery Sources ─────────────────────────────────────────
+# Configure groups/channels to monitor for token discovery.
+# Only use groups you have authorized access to.
+#
+# telegram_identifier can be left blank — the system will attempt to
+# discover matching groups you're a member of. Fill it in explicitly
+# if auto-discovery doesn't find the right group.
+#
+# Valid telegram_identifier formats:
+#   - Public groups: @username
+#   - Private groups: -1001234567890 (numeric chat ID)
+# ────────────────────────────────────────────────────────────────────────
+
+sources:
+
+  # ── Solana ──────────────────────────────────────────────────────────
+  - source_id: "solana_alpha"
+    name: "Solana Alpha"
+    telegram_identifier: ""
+    source_type: "chain_group"
+    enabled: false
+
+  - source_id: "solana_memes"
+    name: "Solana Memes"
+    telegram_identifier: ""
+    source_type: "chain_group"
+    enabled: false
+
+  - source_id: "solana_trading"
+    name: "Solana Trading"
+    telegram_identifier: ""
+    source_type: "chain_group"
+    enabled: false
+
+  # ── Base ────────────────────────────────────────────────────────────
+  - source_id: "base_alpha"
+    name: "Base Alpha"
+    telegram_identifier: ""
+    source_type: "chain_group"
+    enabled: false
+
+  - source_id: "base_memes"
+    name: "Base Memes"
+    telegram_identifier: ""
+    source_type: "chain_group"
+    enabled: false
+
+  - source_id: "base_trading"
+    name: "Base Trading"
+    telegram_identifier: ""
+    source_type: "chain_group"
+    enabled: false
+
+  # ── Ethereum ────────────────────────────────────────────────────────
+  - source_id: "ethereum_alpha"
+    name: "Ethereum Alpha"
+    telegram_identifier: ""
+    source_type: "chain_group"
+    enabled: false
+
+  - source_id: "ethereum_trading"
+    name: "Ethereum Trading"
+    telegram_identifier: ""
+    source_type: "chain_group"
+    enabled: false
+
+  # ── Cross-chain Alpha / Gems ────────────────────────────────────────
+  - source_id: "crypto_alpha"
+    name: "Crypto Alpha"
+    telegram_identifier: ""
+    source_type: "alpha_group"
+    enabled: false
+
+  - source_id: "crypto_gems"
+    name: "Crypto Gems"
+    telegram_identifier: ""
+    source_type: "alpha_group"
+    enabled: false
+
+  # ── Calls / Signals ─────────────────────────────────────────────────
+  - source_id: "degen_calls"
+    name: "Degen Calls"
+    telegram_identifier: ""
+    source_type: "trading_group"
+    enabled: false
+
+  - source_id: "whale_calls"
+    name: "Whale Calls"
+    telegram_identifier: ""
+    source_type: "trading_group"
+    enabled: false
+
+  - source_id: "smart_money_calls"
+    name: "Smart Money Calls"
+    telegram_identifier: ""
+    source_type: "trading_group"
+    enabled: false
+
+  - source_id: "onchain_alpha"
+    name: "Onchain Alpha"
+    telegram_identifier: ""
+    source_type: "alpha_group"
+    enabled: false
+
+  # ── DEX / Launch Platforms ──────────────────────────────────────────
+  - source_id: "dexscreener_gems"
+    name: "Dexscreener Gems"
+    telegram_identifier: ""
+    source_type: "trend_group"
+    enabled: false
+
+  - source_id: "pumpfun_alpha"
+    name: "PumpFun Alpha"
+    telegram_identifier: ""
+    source_type: "meme_group"
+    enabled: false
+
+  - source_id: "moonshot_calls"
+    name: "Moonshot Calls"
+    telegram_identifier: ""
+    source_type: "meme_group"
+    enabled: false
+
+  # ── Memecoins / Low Caps ────────────────────────────────────────────
+  - source_id: "memecoin_discussion"
+    name: "Memecoin Discussion"
+    telegram_identifier: ""
+    source_type: "meme_group"
+    enabled: false
+
+  - source_id: "lowcap_gems"
+    name: "Lowcap Gems"
+    telegram_identifier: ""
+    source_type: "alpha_group"
+    enabled: false
+
+  - source_id: "microcap_gems"
+    name: "Microcap Gems"
+    telegram_identifier: ""
+    source_type: "alpha_group"
+    enabled: false
