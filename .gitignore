@@ -57,6 +57,10 @@ apps/frontend/dist/
 *.sqlite3
 *.sqlite
 
+# Ignore raw database dumps (keep encrypted .enc files)
+db/*.sql
+!db/*.sql.enc
+
 # ===================== Celery =====================
 celerybeat-schedule
 celerybeat.pid
