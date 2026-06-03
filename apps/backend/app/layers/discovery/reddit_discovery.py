@@ -3,9 +3,9 @@ Reddit Discovery — Finds tokens from broader community discussion.
 
 Source: 1.5 Reddit Discovery
 Update: hourly
-Criteria: mentions/comments/upvotes > 2x baseline
+Criteria: mentions > 2x baseline
 
-Issue fixed: Reddit is treated as slower confirmation, not the earliest signal.
+Uses RSS feeds (no auth required). Score/comments/upvotes not available via RSS.
 """
 
 import asyncio
@@ -21,10 +21,8 @@ class RedditDiscovery(BaseDiscoverySource):
 
     Monitors crypto subreddits for:
     - Token mentions (symbol + contract address)
-    - Comment activity
-    - Upvote surges
 
-    Treated as slower confirmation signal, not primary discovery.
+    Uses RSS feeds for collection (no auth). Score/comments/upvotes not available.
     """
 
     TARGET_SUBREDDITS = [
@@ -37,7 +35,7 @@ class RedditDiscovery(BaseDiscoverySource):
     ]
 
     def __init__(self):
-        self._baselines: dict[str, dict] = {}  # subreddit -> {mentions, comments, upvotes}
+        self._baselines: dict[str, dict] = {}  # subreddit -> {mentions}
 
     def source_name(self) -> str:
         return "Reddit"
@@ -64,13 +62,13 @@ class RedditDiscovery(BaseDiscoverySource):
         Scan a single subreddit for recent token mentions.
 
         In production: use asyncpraw to fetch hot/new posts and comments.
-        Extract symbols, contract addresses, count mentions/upvotes/comments.
+        Extract symbols, contract addresses, count mentions.
         """
         return []
 
     def _filter_by_velocity(self, candidates: list[dict]) -> list[dict]:
         """
-        Filter: mentions/comments/upvotes > 2x baseline.
+        Filter: mentions > 2x baseline.
         Reddit is confirmation, not primary signal.
         """
         filtered: list[dict] = []

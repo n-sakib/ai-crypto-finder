@@ -362,9 +362,6 @@ class RedditClientService:
                 "title": title,
                 "author": author_name,
                 "created_utc": post_dt.timestamp(),
-                "score": 0,   # RSS doesn't include score
-                "num_comments": 0,
-                "upvote_ratio": None,
                 "selftext": content if len(content) < 5000 else content[:5000],
                 "permalink": link.replace("https://www.reddit.com", ""),
                 "link_flair_text": category,
@@ -416,9 +413,6 @@ class RedditClientService:
                 title=title,
                 text_hash=hashlib.sha256(combined.encode()).hexdigest(),
                 selftext=selftext if settings.REDDIT_STORE_RAW_TEXT else None,
-                score=post.get("score", 0),
-                num_comments=post.get("num_comments", 0),
-                upvote_ratio=int(post.get("upvote_ratio", 0) * 100) if post.get("upvote_ratio") else None,
                 post_url=f"https://reddit.com{post.get('permalink', '')}",
             )
             session.add(reddit_post)

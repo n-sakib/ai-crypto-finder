@@ -11,6 +11,37 @@ https://github.com/d60/twikit
 Set TWITTER_USERNAME + TWITTER_PASSWORD in .env to enable.
 """
 
+# ── Monkey-patch twikit ClientTransaction for KEY_BYTE fix ────────────
+# Twitter changed ondemand.s.js structure on March 18 2026.
+# Remove this block when twikit releases an official fix.
+# Ref: https://github.com/d60/twikit/issues/408
+def _apply_twikit_monkey_patch():
+    import re as _re
+    _tx_mod = __import__('twikit.x_client_transaction.transaction', fromlist=['ClientTransaction'])
+    _tx_mod.ON_DEMAND_FILE_REGEX = _re.compile(
+        r""",(\d+):["']ondemand\.s["']""", flags=(_re.VERBOSE | _re.MULTILINE))
+    _tx_mod.ON_DEMAND_HASH_PATTERN = r',{}:"([0-9a-f]+)"'
+
+    async def _patched_get_indices(self, home_page_response, session, headers):
+        key_byte_indices = []
+        response = self.validate_response(home_page_response) or self.home_page_response
+        on_demand_file_index = _tx_mod.ON_DEMAND_FILE_REGEX.search(str(response)).group(1)
+        regex = _re.compile(_tx_mod.ON_DEMAND_HASH_PATTERN.format(on_demand_file_index))
+        filename = regex.search(str(response)).group(1)
+        on_demand_file_url = f"https://abs.twimg.com/responsive-web/client-web/ondemand.s.{filename}a.js"
+        on_demand_file_response = await session.request(method="GET", url=on_demand_file_url, headers=headers)
+        key_byte_indices_match = _tx_mod.INDICES_REGEX.finditer(str(on_demand_file_response.text))
+        for item in key_byte_indices_match:
+            key_byte_indices.append(item.group(2))
+        if not key_byte_indices:
+            raise Exception("Couldn't get KEY_BYTE indices")
+        key_byte_indices = list(map(int, key_byte_indices))
+        return key_byte_indices[0], key_byte_indices[1:]
+
+    _tx_mod.ClientTransaction.get_indices = _patched_get_indices
+
+_apply_twikit_monkey_patch()
+# ── End monkey-patch ──────────────────────────────────────────────────
 import asyncio
 import json
 import os
@@ -21,6 +52,9 @@ from typing import Optional
 from app.config import settings
 from app.core.redis import get_redis
 from app.layers.discovery.base import BaseDiscoverySource
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Redis keys for Twitter discovery
 TWITTER_BASELINE_KEY = "twitter:mention_baselines"
@@ -28,7 +62,9 @@ TWITTER_PREVIOUS_KEY = "twitter:previous_snapshot"
 TWITTER_BASELINE_TTL = 7 * 24 * 3600
 TWITTER_PREVIOUS_TTL = 3600
 
-# Twikit cookies file — persists login session across runs
+# Browser cookies file — export from logged-in Twitter session
+TWITTER_COOKIES_JSON = os.path.join(os.path.dirname(__file__), "..", "..", "..", "twitter_cookies.json")
+# Legacy twikit cookies file
 TWIKIT_COOKIES_FILE = os.path.join(os.path.dirname(__file__), ".twikit_cookies.json")
 
 # ── 3-Dimension Velocity Weights ─────────────────────
@@ -118,56 +154,46 @@ class TwitterDiscovery(BaseDiscoverySource):
         self._twikit_client = None  # lazy-init
 
     def source_name(self) -> str:
-        return "Twitter/X (Twikit)" if settings.TWITTER_USERNAME else "Twitter/X (disabled — set TWITTER_USERNAME)"
+        return "Twitter/X (Twikit)" if os.path.exists(TWITTER_COOKIES_JSON) else "Twitter/X (disabled — export cookies)"
 
-    async def _get_twikit_client(self):
-        """Get or create a twikit Client (lazy, reuses cookies)."""
+    async def _get_client(self):
+        """Get httpx client for Nitter RSS (no auth, no Cloudflare, always works)."""
         if self._twikit_client is not None:
             return self._twikit_client
 
-        from twikit import Client as TwikitClient
-
-        client = TwikitClient("en-US")
-
-        if os.path.exists(TWIKIT_COOKIES_FILE):
-            try:
-                client.load_cookies(TWIKIT_COOKIES_FILE)
-                await client.user()
-                self._twikit_client = client
-                return client
-            except Exception:
-                pass
-
-        if settings.TWITTER_USERNAME and settings.TWITTER_PASSWORD:
-            try:
-                await client.login(
-                    auth_info_1=settings.TWITTER_USERNAME,
-                    auth_info_2=settings.TWITTER_EMAIL or settings.TWITTER_USERNAME,
-                    password=settings.TWITTER_PASSWORD,
-                    cookies_file=TWIKIT_COOKIES_FILE,
-                )
-                client.save_cookies(TWIKIT_COOKIES_FILE)
-                self._twikit_client = client
-                return client
-            except Exception:
-                pass
-
-        return None
+        import httpx
+        client = httpx.AsyncClient(
+            headers={"User-Agent": "Mozilla/5.0 (compatible; AI-Crypto-Finder/1.0)"},
+            timeout=httpx.Timeout(15.0),
+            follow_redirects=True,
+        )
+        self._twikit_client = client
+        logger.info("Nitter RSS client ready")
+        return client
 
     # ── Public API ──────────────────────────────────────
 
     async def discover(self) -> list[dict]:
         """
         Search Twitter for crypto token mentions via Twikit (free scraping).
+
+        Searches run sequentially (not concurrently) to avoid triggering
+        Twitter's rate-limiter and anti-bot detection. Each search query
+        has a 3s cooldown; running two search streams in parallel would
+        double the request rate and risk account suspension.
         """
         await self._load_baselines()
         previous_mentions = await self._load_previous()
 
-        kw, addr = await asyncio.gather(
-            self._search_keywords_twikit(),
-            self._search_addresses_twikit(),
-            return_exceptions=True,
-        )
+        # ⚠️ Sequential only — concurrent searches = account ban risk
+        try:
+            kw = await self._search_keywords()
+        except Exception:
+            kw = []
+        try:
+            addr = await self._search_addresses()
+        except Exception:
+            addr = []
 
         candidates: list[dict] = []
         if isinstance(kw, list):
@@ -260,13 +286,15 @@ class TwitterDiscovery(BaseDiscoverySource):
         except Exception:
             pass
 
-    # ── Twikit Search ───────────────────────────────────
+    # ── Nitter RSS Search ──────────────────────────────
 
-    # Search terms for twikit (simple strings, no advanced operators)
-    TWIKIT_SEARCH_TERMS: list[str] = [
-        "$PEPE", "$WIF", "$BONK", "$GOAT", "$TAO", "$AERO",
-        "$SOL", "$ETH", "$BTC", "$BNB", "$SUI", "$APT",
-        "$DOGE", "$SHIB", "$FLOKI",
+    NITTER_INSTANCES = [
+        "https://nitter.net",
+        "https://nitter.poast.org",
+        "https://nitter.privacydev.net",
+    ]
+
+    SEARCH_TERMS: list[str] = [
         "new launch crypto", "just launched token",
         "fair launch", "stealth launch",
         "AI agent crypto", "AI crypto token",
@@ -275,49 +303,91 @@ class TwitterDiscovery(BaseDiscoverySource):
         "contract address 0x", "ca: 0x",
     ]
 
-    async def _search_twikit(self, query: str, max_tweets: int = 30) -> list:
-        """Search Twitter via twikit scraping. Returns list of Tweet objects."""
-        client = await self._get_twikit_client()
+    async def _fetch_rss(self, url: str, retries: int = 3) -> str | None:
+        """Fetch RSS feed from Nitter, trying multiple instances."""
+        client = await self._get_client()
         if client is None:
-            return []
-        try:
-            tweets = await client.search_tweet(query, "Latest")
-            # Collect up to max_tweets
-            results = []
-            count = 0
-            async for tweet in tweets:
-                results.append(tweet)
-                count += 1
-                if count >= max_tweets:
-                    break
-            return results
-        except Exception:
+            return None
+
+        for instance in self.NITTER_INSTANCES:
+            full_url = f"{instance}{url}"
+            for attempt in range(retries):
+                try:
+                    resp = await client.get(full_url)
+                    if resp.status_code == 200:
+                        return resp.text
+                except Exception:
+                    if attempt < retries - 1:
+                        await asyncio.sleep(2)
+                        continue
+        return None
+
+    async def _search_rss(self, query: str) -> list[dict]:
+        """Search via Nitter RSS and parse results."""
+        import xml.etree.ElementTree as ET
+        from urllib.parse import quote
+
+        rss_url = f"/search/rss?f=tweets&q={quote(query)}"
+        xml_text = await self._fetch_rss(rss_url)
+        if not xml_text:
             return []
 
-    async def _search_keywords_twikit(self) -> list[dict]:
-        """Search Twitter via twikit for crypto keywords — tracks 3D velocity."""
+        tweets = []
+        try:
+            root = ET.fromstring(xml_text)
+            for item in root.findall(".//item"):
+                title = item.findtext("title", "")
+                link = item.findtext("link", "")
+                desc = item.findtext("description", "") or ""
+                pub_date = item.findtext("pubDate", "")
+                creator = item.findtext("{http://purl.org/dc/elements/1.1/}creator", "")
+
+                text = desc or title
+                tweets.append({
+                    "id": link,
+                    "text": text,
+                    "created_at": pub_date,
+                    "user": {"name": creator, "id": creator, "screen_name": creator},
+                    "retweet_count": 0,
+                    "like_count": 0,
+                    "reply_count": 0,
+                })
+        except Exception:
+            pass
+        return tweets
+
+    async def _search_keywords(self, progress_callback=None) -> list[dict]:
+        """Search Twitter via GraphQL for crypto keywords."""
         mention_counter: Counter = Counter()
         engagement_counter: Counter = Counter()
         unique_accounts: dict[str, set[str]] = {}
         authority_counter: Counter = Counter()
         tweet_samples: dict[str, list[str]] = {}
+        total_terms = len(self.SEARCH_TERMS)
 
-        for query in self.TWIKIT_SEARCH_TERMS:
+        for idx, query in enumerate(self.SEARCH_TERMS):
+            if progress_callback:
+                await progress_callback({
+                    "status": "searching",
+                    "sources_done": idx,
+                    "sources_total": total_terms + 3,  # +3 for address queries
+                    "query": query,
+                })
             try:
-                tweets = await self._search_twikit(query)
+                tweets = await self._search_rss(query)
                 for tweet in tweets:
-                    text = getattr(tweet, "text", "") or ""
-                    user = getattr(tweet, "user", None)
-                    author_id = getattr(user, "id", "") if user else ""
-                    author_name = getattr(user, "name", "") if user else ""
+                    text = tweet.get("text", "")
+                    user = tweet.get("user", {}) or {}
+                    author_id = user.get("id", "")
+                    author_name = user.get("name", "")
 
                     if not text or self._is_spam_text(text):
                         continue
 
                     engagement = (
-                        getattr(tweet, "retweet_count", 0) or 0
-                        + (getattr(tweet, "like_count", 0) or 0)
-                        + (getattr(tweet, "reply_count", 0) or 0)
+                        tweet.get("retweet_count", 0) or 0
+                        + (tweet.get("like_count", 0) or 0)
+                        + (tweet.get("reply_count", 0) or 0)
                     )
 
                     # Check authority by author name
@@ -349,6 +419,10 @@ class TwitterDiscovery(BaseDiscoverySource):
             except Exception:
                 continue
 
+            # Cooldown between queries — protects against rate limits and account bans
+            # 27 search terms × 3s = ~81s total delay, well within 50req/15min limit
+            await asyncio.sleep(3.0)
+
         candidates = []
         for symbol in mention_counter:
             mc = mention_counter[symbol]
@@ -367,24 +441,32 @@ class TwitterDiscovery(BaseDiscoverySource):
             })
         return candidates
 
-    async def _search_addresses_twikit(self) -> list[dict]:
-        """Search Twitter via twikit for contract addresses."""
+    async def _search_addresses(self, progress_callback=None) -> list[dict]:
+        """Search Twitter via GraphQL for contract addresses."""
         address_candidates: list[dict] = []
         seen_addresses: set[str] = set()
 
         address_queries = ["contract address 0x", "ca: 0x", "0x new token"]
+        keyword_count = len(self.SEARCH_TERMS)
 
-        for query in address_queries:
+        for idx, query in enumerate(address_queries):
+            if progress_callback:
+                await progress_callback({
+                    "status": "searching",
+                    "sources_done": keyword_count + idx,
+                    "sources_total": keyword_count + len(address_queries),
+                    "query": query,
+                })
             try:
-                tweets = await self._search_twikit(query)
+                tweets = await self._search_rss(query)
                 for tweet in tweets:
-                    text = getattr(tweet, "text", "") or ""
+                    text = tweet.get("text", "") or ""
                     if not text.strip():
                         continue
 
                     engagement = (
-                        getattr(tweet, "retweet_count", 0) or 0
-                        + (getattr(tweet, "like_count", 0) or 0)
+                        tweet.get("retweet_count", 0) or 0
+                        + (tweet.get("like_count", 0) or 0)
                     )
 
                     for addr in self.CONTRACT_ADDRESS_EVM_RE.findall(text):
@@ -420,6 +502,9 @@ class TwitterDiscovery(BaseDiscoverySource):
 
             except Exception:
                 continue
+
+            # Cooldown between queries
+            await asyncio.sleep(3.0)
 
         return address_candidates
 

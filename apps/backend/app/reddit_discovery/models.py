@@ -94,9 +94,6 @@ class RedditPost(Base):
     title = Column(Text, nullable=False)
     text_hash = Column(String(128), nullable=False)
     selftext = Column(Text, nullable=True)
-    score = Column(Integer, nullable=False, default=0)
-    num_comments = Column(Integer, nullable=False, default=0)
-    upvote_ratio = Column(Integer, nullable=True)  # Reddit returns 0-100, nullable for comments
     post_url = Column(String(512), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
@@ -202,7 +199,6 @@ class RedditDiscoveryRanking(Base):
     unique_user_count = Column(Integer, nullable=False, default=0)
     subreddit_count = Column(Integer, nullable=False, default=0)
     post_count = Column(Integer, nullable=False, default=0)
-    comment_count = Column(Integer, nullable=False, default=0)
     total_score = Column(Integer, nullable=False, default=0)
     rank = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

@@ -190,16 +190,6 @@ async def get_reddit_stats(
         select(func.count(RedditSource.id)).where(RedditSource.enabled == True)
     )).scalar() or 0
 
-    # Aggregate comment count and upvotes
-    agg_result = (await session.execute(
-        select(
-            func.coalesce(func.sum(RedditPost.num_comments), 0),
-            func.coalesce(func.sum(RedditPost.score), 0),
-        )
-    )).one()
-    total_comments = agg_result[0] or 0
-    total_upvotes = agg_result[1] or 0
-
     latest = (await session.execute(
         select(RedditTokenMention.post_timestamp)
         .order_by(desc(RedditTokenMention.post_timestamp))
@@ -210,8 +200,6 @@ async def get_reddit_stats(
         candidate_tokens=token_count,
         total_mentions=mention_count,
         posts_stored=post_count,
-        total_comments=total_comments,
-        total_upvotes=total_upvotes,
         enabled_sources=src_count,
         latest_mention_at=latest,
         generated_at=datetime.now(timezone.utc),

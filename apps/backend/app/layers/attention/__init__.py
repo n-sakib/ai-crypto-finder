@@ -6,7 +6,7 @@ Layer 3: Tracks social velocity across platforms.
 Metrics:
 - 3.1 X Velocity: mentions, unique accounts, engagement
 - 3.2 Telegram Velocity: messages, unique users, new members
-- 3.3 Reddit Velocity: mentions, comments, upvotes
+- 3.3 Reddit Velocity: mentions (RSS-based, no comments/upvotes available)
 - 3.4 Coingecko Velocity: trending rank, news mentions
 """
 
@@ -37,8 +37,6 @@ class AttentionScore:
     coingecko_trending_rank: int = 0
     coingecko_news_count: int = 0
     reddit_mentions: int = 0
-    reddit_comments: int = 0
-    reddit_upvotes: int = 0
 
     # Velocity ratios
     twitter_velocity: float = 0.0
@@ -240,10 +238,8 @@ class AttentionLayer:
         result.coingecko_score = min(news_score + trending_bonus, 100.0)
 
     def _score_reddit(self, result: AttentionScore, data: dict, baselines: dict):
-        """Reddit Velocity — mentions, comments, upvotes. Confirmation signal."""
+        """Reddit Velocity — mentions only. Confirmation signal (RSS doesn't provide upvotes/comments)."""
         result.reddit_mentions = data.get("mentions", 0)
-        result.reddit_comments = data.get("comments", 0)
-        result.reddit_upvotes = data.get("upvotes", 0)
 
         baseline = baselines.get("avg_reddit_mentions", 1.0)
         current = max(result.reddit_mentions, 1)

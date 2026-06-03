@@ -18,6 +18,7 @@ from app.core.schemas import (
 )
 from app.telegram_discovery.api import router as telegram_discovery_router
 from app.reddit_discovery.api import router as reddit_discovery_router
+from app.twitter_discovery.api import router as twitter_discovery_router
 
 router = APIRouter()
 
@@ -26,6 +27,9 @@ router.include_router(telegram_discovery_router)
 
 # Include Reddit discovery sub-router
 router.include_router(reddit_discovery_router)
+
+# Include Twitter discovery sub-router
+router.include_router(twitter_discovery_router)
 
 # ── Token Endpoints ────────────────────────────────────────────────────
 

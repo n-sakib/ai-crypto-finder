@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api, telegramApi, redditApi } from '../api/client';
-import type { TokenSummary, TokenDetail, RankingResponse, PipelineStatusData, SystemStats, TelegramDiscoveryResponse, TelegramSource, TelegramStats, RedditDiscoveryResponse, RedditSource, RedditStats } from '../api/client';
+import { api, telegramApi, redditApi, twitterApi } from '../api/client';
+import type { TokenSummary, TokenDetail, RankingResponse, PipelineStatusData, SystemStats, TelegramDiscoveryResponse, TelegramSource, TelegramStats, RedditDiscoveryResponse, RedditSource, RedditStats, TwitterDiscoveryResponse, TwitterSource, TwitterStats } from '../api/client';
 
 export function useRankings() {
   return useQuery<RankingResponse>({
@@ -117,6 +117,35 @@ export function useRedditStats() {
   return useQuery<RedditStats>({
     queryKey: ['reddit-stats'],
     queryFn: redditApi.getStats,
+    refetchInterval: 30_000,
+    staleTime: 0,
+  });
+}
+
+// ── Twitter Discovery Hooks ──────────────────────────────────────────
+
+export function useTwitterDiscovery(params?: { window?: string; limit?: number; min_mentions?: number; min_users?: number }) {
+  return useQuery<TwitterDiscoveryResponse>({
+    queryKey: ['twitter-discovery', params],
+    queryFn: () => twitterApi.getDiscovery(params),
+    refetchInterval: 60_000,
+    staleTime: 0,
+  });
+}
+
+export function useTwitterSources() {
+  return useQuery<TwitterSource[]>({
+    queryKey: ['twitter-sources'],
+    queryFn: twitterApi.getSources,
+    refetchInterval: 60_000,
+    staleTime: 0,
+  });
+}
+
+export function useTwitterStats() {
+  return useQuery<TwitterStats>({
+    queryKey: ['twitter-stats'],
+    queryFn: twitterApi.getStats,
     refetchInterval: 30_000,
     staleTime: 0,
   });

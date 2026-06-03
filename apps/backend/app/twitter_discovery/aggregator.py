@@ -1,19 +1,14 @@
 """
-RedditDiscoveryAggregator — Aggregates Reddit mentions and produces discovery rankings.
+TwitterDiscoveryAggregator — Aggregates Twitter mentions into discovery rankings.
 
 For a configurable time window, ranks tokens by:
     1. mention_count DESC
     2. unique_user_count DESC
-    3. subreddit_count DESC
-    4. post_count DESC
+    3. total_engagement DESC
+    4. authority_mentions DESC
     5. most recent mention DESC
 
-Tracks KPIs: mentions, unique_authors, subreddit_count, post_count
-
-Minimum filters:
-    - mention_count >= 2
-    - unique_user_count >= 2
-    - token must resolve to chain + token_address
+Tracks KPIs: mentions, unique_users, engagement, authority_mentions
 """
 
 from __future__ import annotations
@@ -23,24 +18,24 @@ import re
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from sqlalchemy import select, func, desc, and_
+from sqlalchemy import select, func, desc, and_, Integer, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.reddit_discovery.models import (
-    RedditCandidateToken, RedditTokenMention, RedditDiscoveryRanking,
-    RedditPost, RedditSource, RedditDiscoveryMethod,
+from app.twitter_discovery.models import (
+    TwitterCandidateToken, TwitterTokenMention, TwitterDiscoveryRanking,
+    TwitterTweet, TwitterSource, TwitterDiscoveryMethod,
 )
-from app.reddit_discovery.schemas import RedditDiscoveryRankingItem, RedditDiscoveryRankingResponse
+from app.twitter_discovery.schemas import TwitterDiscoveryRankingItem, TwitterDiscoveryRankingResponse
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 def parse_window(window_str: str) -> timedelta:
-    """Parse a window string like '1h', '30m', '6h', '24h' into a timedelta."""
+    """Parse a window string like '1h', '6h', '24h' into a timedelta."""
     match = re.match(r"^(\d+)([mhd])$", window_str.strip().lower())
     if not match:
-        return timedelta(hours=24)  # Default: 24h for Reddit (slower signal)
+        return timedelta(hours=24)
     value = int(match.group(1))
     unit = match.group(2)
     if unit == "m":
@@ -52,10 +47,8 @@ def parse_window(window_str: str) -> timedelta:
     return timedelta(hours=24)
 
 
-class RedditDiscoveryAggregator:
-    """
-    Aggregates Reddit token mentions into ranked discovery lists.
-    """
+class TwitterDiscoveryAggregator:
+    """Aggregates Twitter token mentions into ranked discovery lists."""
 
     def __init__(
         self,
@@ -70,7 +63,7 @@ class RedditDiscoveryAggregator:
         session: AsyncSession,
         window: str = "24h",
         limit: int | None = None,
-    ) -> RedditDiscoveryRankingResponse:
+    ) -> TwitterDiscoveryRankingResponse:
         """Compute rankings for the given time window."""
         if limit is None:
             limit = settings.TOP_DISCOVERY_LIMIT
@@ -80,15 +73,15 @@ class RedditDiscoveryAggregator:
         window_end = now
 
         rankings = await self._aggregate_mentions(session, window_start, window_end, limit)
-        total_posts = await self._count_posts_in_window(session, window_start, window_end)
+        total_tweets = await self._count_tweets_in_window(session, window_start, window_end)
         await self._persist_rankings(session, rankings, window_start, window_end)
 
-        return RedditDiscoveryRankingResponse(
+        return TwitterDiscoveryRankingResponse(
             window=window,
             window_start=window_start,
             window_end=window_end,
             total_tokens=len(rankings),
-            total_posts=total_posts,
+            total_tweets=total_tweets,
             generated_at=now,
             tokens=rankings,
         )
@@ -99,36 +92,36 @@ class RedditDiscoveryAggregator:
         window_start: datetime,
         window_end: datetime,
         limit: int,
-    ) -> list[RedditDiscoveryRankingItem]:
+    ) -> list[TwitterDiscoveryRankingItem]:
         """Query mentions in the time window and aggregate by token."""
         mention_agg = (
             select(
-                RedditTokenMention.candidate_token_id,
-                func.count(RedditTokenMention.id).label("mention_count"),
-                func.count(func.distinct(RedditTokenMention.author)).label("unique_user_count"),
-                func.count(func.distinct(RedditTokenMention.source_id)).label("subreddit_count"),
-                func.count(func.distinct(RedditTokenMention.reddit_post_id)).label("post_count"),
-                func.min(RedditTokenMention.post_timestamp).label("first_seen"),
-                func.max(RedditTokenMention.post_timestamp).label("last_seen"),
+                TwitterTokenMention.candidate_token_id,
+                func.count(TwitterTokenMention.id).label("mention_count"),
+                func.count(func.distinct(TwitterTokenMention.author_name)).label("unique_user_count"),
+                func.coalesce(func.sum(TwitterTokenMention.engagement_score), 0).label("total_engagement"),
+                func.coalesce(func.sum(case((TwitterTokenMention.is_reputable == True, 1), else_=0)), 0).label("authority_mentions"),
+                func.min(TwitterTokenMention.tweet_timestamp).label("first_seen"),
+                func.max(TwitterTokenMention.tweet_timestamp).label("last_seen"),
             )
             .where(
                 and_(
-                    RedditTokenMention.post_timestamp >= window_start,
-                    RedditTokenMention.post_timestamp < window_end,
+                    TwitterTokenMention.tweet_timestamp >= window_start,
+                    TwitterTokenMention.tweet_timestamp < window_end,
                 )
             )
-            .group_by(RedditTokenMention.candidate_token_id)
+            .group_by(TwitterTokenMention.candidate_token_id)
             .having(
                 and_(
-                    func.count(RedditTokenMention.id) >= self.min_mention_count,
-                    func.count(func.distinct(RedditTokenMention.author)) >= self.min_unique_users,
+                    func.count(TwitterTokenMention.id) >= self.min_mention_count,
+                    func.count(func.distinct(TwitterTokenMention.author_name)) >= self.min_unique_users,
                 )
             )
             .order_by(
                 desc("mention_count"),
                 desc("unique_user_count"),
-                desc("subreddit_count"),
-                desc("post_count"),
+                desc("total_engagement"),
+                desc("authority_mentions"),
                 desc("last_seen"),
             )
             .limit(limit)
@@ -136,20 +129,20 @@ class RedditDiscoveryAggregator:
 
         query = (
             select(
-                RedditCandidateToken,
+                TwitterCandidateToken,
                 mention_agg.c.mention_count,
                 mention_agg.c.unique_user_count,
-                mention_agg.c.subreddit_count,
-                mention_agg.c.post_count,
+                mention_agg.c.total_engagement,
+                mention_agg.c.authority_mentions,
                 mention_agg.c.first_seen,
                 mention_agg.c.last_seen,
             )
-            .join(mention_agg, RedditCandidateToken.id == mention_agg.c.candidate_token_id)
+            .join(mention_agg, TwitterCandidateToken.id == mention_agg.c.candidate_token_id)
             .order_by(
                 desc(mention_agg.c.mention_count),
                 desc(mention_agg.c.unique_user_count),
-                desc(mention_agg.c.subreddit_count),
-                desc(mention_agg.c.post_count),
+                desc(mention_agg.c.total_engagement),
+                desc(mention_agg.c.authority_mentions),
                 desc(mention_agg.c.last_seen),
             )
         )
@@ -157,38 +150,45 @@ class RedditDiscoveryAggregator:
         result = await session.execute(query)
         rows = result.all()
 
-        rankings: list[RedditDiscoveryRankingItem] = []
+        rankings: list[TwitterDiscoveryRankingItem] = []
         for rank_idx, row in enumerate(rows, start=1):
             token = row[0]
 
             # Get discovery methods and source names
             methods_result = await session.execute(
-                select(func.distinct(RedditTokenMention.discovery_method))
+                select(func.distinct(TwitterTokenMention.discovery_method))
                 .where(
                     and_(
-                        RedditTokenMention.candidate_token_id == token.id,
-                        RedditTokenMention.post_timestamp >= window_start,
-                        RedditTokenMention.post_timestamp < window_end,
+                        TwitterTokenMention.candidate_token_id == token.id,
+                        TwitterTokenMention.tweet_timestamp >= window_start,
+                        TwitterTokenMention.tweet_timestamp < window_end,
                     )
                 )
             )
             methods = [r[0] for r in methods_result.all()]
 
             sources_result = await session.execute(
-                select(RedditSource.name)
-                .join(RedditTokenMention, RedditTokenMention.source_id == RedditSource.id)
+                select(TwitterSource.name)
+                .join(TwitterTokenMention, TwitterTokenMention.source_id == TwitterSource.id)
                 .where(
                     and_(
-                        RedditTokenMention.candidate_token_id == token.id,
-                        RedditTokenMention.post_timestamp >= window_start,
-                        RedditTokenMention.post_timestamp < window_end,
+                        TwitterTokenMention.candidate_token_id == token.id,
+                        TwitterTokenMention.tweet_timestamp >= window_start,
+                        TwitterTokenMention.tweet_timestamp < window_end,
                     )
                 )
                 .distinct()
             )
             source_names = [r[0] for r in sources_result.all()]
 
-            rankings.append(RedditDiscoveryRankingItem(
+            total_score = (
+                row.mention_count * 10
+                + row.unique_user_count * 5
+                + (row.total_engagement or 0) * 0.1
+                + (row.authority_mentions or 0) * 50
+            )
+
+            rankings.append(TwitterDiscoveryRankingItem(
                 rank=rank_idx,
                 chain=token.chain,
                 token_address=token.token_address,
@@ -196,9 +196,9 @@ class RedditDiscoveryAggregator:
                 name=token.name,
                 mention_count=row.mention_count,
                 unique_user_count=row.unique_user_count,
-                subreddit_count=row.subreddit_count,
-                post_count=row.post_count,
-                total_score=row.mention_count,
+                total_engagement=int(row.total_engagement or 0),
+                authority_mentions=row.authority_mentions or 0,
+                total_score=round(total_score, 1),
                 first_seen_in_window=row.first_seen,
                 last_seen_in_window=row.last_seen,
                 discovery_methods=methods,
@@ -209,17 +209,17 @@ class RedditDiscoveryAggregator:
 
         return rankings
 
-    async def _count_posts_in_window(
+    async def _count_tweets_in_window(
         self,
         session: AsyncSession,
         window_start: datetime,
         window_end: datetime,
     ) -> int:
         result = await session.execute(
-            select(func.count(RedditPost.id)).where(
+            select(func.count(TwitterTweet.id)).where(
                 and_(
-                    RedditPost.post_timestamp >= window_start,
-                    RedditPost.post_timestamp < window_end,
+                    TwitterTweet.tweet_timestamp >= window_start,
+                    TwitterTweet.tweet_timestamp < window_end,
                 )
             )
         )
@@ -228,29 +228,27 @@ class RedditDiscoveryAggregator:
     async def _persist_rankings(
         self,
         session: AsyncSession,
-        rankings: list[RedditDiscoveryRankingItem],
+        rankings: list[TwitterDiscoveryRankingItem],
         window_start: datetime,
         window_end: datetime,
     ) -> None:
         """Persist rankings to the database."""
-        # Clean old rankings for this window
         from sqlalchemy import delete
         await session.execute(
-            delete(RedditDiscoveryRanking).where(
+            delete(TwitterDiscoveryRanking).where(
                 and_(
-                    RedditDiscoveryRanking.window_start == window_start,
-                    RedditDiscoveryRanking.window_end == window_end,
+                    TwitterDiscoveryRanking.window_start == window_start,
+                    TwitterDiscoveryRanking.window_end == window_end,
                 )
             )
         )
 
         for item in rankings:
-            # Find the candidate token ID
             token_result = await session.execute(
-                select(RedditCandidateToken.id).where(
+                select(TwitterCandidateToken.id).where(
                     and_(
-                        RedditCandidateToken.chain == item.chain,
-                        RedditCandidateToken.token_address == item.token_address,
+                        TwitterCandidateToken.chain == item.chain,
+                        TwitterCandidateToken.token_address == item.token_address,
                     )
                 )
             )
@@ -258,15 +256,15 @@ class RedditDiscoveryAggregator:
             if not token_id:
                 continue
 
-            ranking = RedditDiscoveryRanking(
+            ranking = TwitterDiscoveryRanking(
                 candidate_token_id=token_id,
                 window_start=window_start,
                 window_end=window_end,
                 mention_count=item.mention_count,
                 unique_user_count=item.unique_user_count,
-                subreddit_count=item.subreddit_count,
-                post_count=item.post_count,
-                total_score=item.total_score,
+                total_engagement=item.total_engagement,
+                authority_mentions=item.authority_mentions,
+                total_score=int(item.total_score),
                 rank=item.rank,
             )
             session.add(ranking)
@@ -281,10 +279,10 @@ class RedditDiscoveryAggregator:
     ) -> dict | None:
         """Get detailed discovery data for a specific token."""
         token_result = await session.execute(
-            select(RedditCandidateToken).where(
+            select(TwitterCandidateToken).where(
                 and_(
-                    RedditCandidateToken.chain == chain,
-                    RedditCandidateToken.token_address == token_address,
+                    TwitterCandidateToken.chain == chain,
+                    TwitterCandidateToken.token_address == token_address,
                 )
             )
         )
@@ -293,52 +291,52 @@ class RedditDiscoveryAggregator:
             return None
 
         mention_count_result = await session.execute(
-            select(func.count(RedditTokenMention.id))
-            .where(RedditTokenMention.candidate_token_id == token.id)
+            select(func.count(TwitterTokenMention.id))
+            .where(TwitterTokenMention.candidate_token_id == token.id)
         )
         total_mentions = mention_count_result.scalar() or 0
 
         users_result = await session.execute(
-            select(func.count(func.distinct(RedditTokenMention.author)))
-            .where(RedditTokenMention.candidate_token_id == token.id)
+            select(func.count(func.distinct(TwitterTokenMention.author_name)))
+            .where(TwitterTokenMention.candidate_token_id == token.id)
         )
         unique_users = users_result.scalar() or 0
 
-        sr_result = await session.execute(
-            select(func.count(func.distinct(RedditTokenMention.source_id)))
-            .where(RedditTokenMention.candidate_token_id == token.id)
+        eng_result = await session.execute(
+            select(func.coalesce(func.sum(TwitterTokenMention.engagement_score), 0))
+            .where(TwitterTokenMention.candidate_token_id == token.id)
         )
-        subreddit_count = sr_result.scalar() or 0
+        total_engagement = int(eng_result.scalar() or 0)
 
-        post_count_result = await session.execute(
-            select(func.count(func.distinct(RedditTokenMention.reddit_post_id)))
-            .where(RedditTokenMention.candidate_token_id == token.id)
+        auth_result = await session.execute(
+            select(func.coalesce(func.sum(case((TwitterTokenMention.is_reputable == True, 1), else_=0)), 0))
+            .where(TwitterTokenMention.candidate_token_id == token.id)
         )
-        post_count = post_count_result.scalar() or 0
+        authority_mentions = auth_result.scalar() or 0
 
-        # Total score based on mention count (RSS doesn't provide upvotes)
-        total_score = total_mentions
+        total_score = total_mentions * 10 + unique_users * 5 + total_engagement * 0.1 + (authority_mentions or 0) * 50
 
         # Recent mentions
         recent_result = await session.execute(
             select(
-                RedditTokenMention,
-                RedditPost.title,
-                RedditSource.name,
+                TwitterTokenMention,
+                TwitterTweet.tweet_text,
+                TwitterSource.name,
             )
-            .join(RedditPost, RedditTokenMention.reddit_post_id == RedditPost.id)
-            .join(RedditSource, RedditTokenMention.source_id == RedditSource.id)
-            .where(RedditTokenMention.candidate_token_id == token.id)
-            .order_by(desc(RedditTokenMention.post_timestamp))
+            .join(TwitterTweet, TwitterTokenMention.tweet_id == TwitterTweet.id)
+            .join(TwitterSource, TwitterTokenMention.source_id == TwitterSource.id)
+            .where(TwitterTokenMention.candidate_token_id == token.id)
+            .order_by(desc(TwitterTokenMention.tweet_timestamp))
             .limit(20)
         )
         recent = [
             {
-                "author": r[0].author,
+                "author": r[0].author_name,
                 "discovery_method": r[0].discovery_method.value if hasattr(r[0].discovery_method, 'value') else str(r[0].discovery_method),
-                "post_title": r[1],
+                "tweet_text": (r[1] or "")[:200],
                 "source_name": r[2],
-                "timestamp": r[0].post_timestamp.isoformat(),
+                "is_reputable": r[0].is_reputable,
+                "timestamp": r[0].tweet_timestamp.isoformat(),
             }
             for r in recent_result.all()
         ]
@@ -354,9 +352,9 @@ class RedditDiscoveryAggregator:
             "first_discovery_method": token.first_discovery_method,
             "total_mentions": total_mentions,
             "unique_users": unique_users,
-            "subreddit_count": subreddit_count,
-            "post_count": post_count,
-            "total_score": total_score,
+            "total_engagement": total_engagement,
+            "authority_mentions": authority_mentions,
+            "total_score": round(total_score, 1),
             "recent_mentions": recent,
             "rankings": [],
         }

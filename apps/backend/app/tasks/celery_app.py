@@ -24,5 +24,18 @@ celery_app.conf.update(
 )
 
 celery_app.conf.beat_schedule = {
-    # No scheduled jobs — everything runs on demand via the main pipeline.
+    # ── Discovery Layer (1) ─────────────────────────────
+    "run-twitter-discovery": {
+        "task": "app.tasks.discovery.run_twitter_discovery",
+        "schedule": 3600.0,  # every hour
+    },
+    "run-dexscreener-discovery": {
+        "task": "app.tasks.discovery.run_dexscreener_discovery",
+        "schedule": 900.0,  # every 15 min
+    },
+    # ── Telegram Discovery ──────────────────────────────
+    "run-telegram-discovery": {
+        "task": "app.tasks.discovery.run_telegram_discovery",
+        "schedule": 3600.0,  # every hour
+    },
 }

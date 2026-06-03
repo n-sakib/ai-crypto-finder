@@ -222,8 +222,6 @@ export interface RedditDiscoveryToken {
   unique_user_count: number;
   subreddit_count: number;
   post_count: number;
-  comment_count: number;
-  upvotes: number;
   total_score: number;
   first_seen_in_window: string;
   last_seen_in_window: string;
@@ -239,8 +237,6 @@ export interface RedditDiscoveryResponse {
   window_end: string;
   total_tokens: number;
   total_posts: number;
-  total_comments: number;
-  total_upvotes: number;
   generated_at: string;
   tokens: RedditDiscoveryToken[];
 }
@@ -249,8 +245,6 @@ export interface RedditStats {
   candidate_tokens: number;
   total_mentions: number;
   posts_stored: number;
-  total_comments: number;
-  total_upvotes: number;
   enabled_sources: number;
   latest_mention_at: string | null;
   generated_at: string;
@@ -278,4 +272,82 @@ export const redditApi = {
   },
   removeSource: (sourceId: string) => fetchJSON<{ status: string }>(`/reddit/sources/${sourceId}`, { method: 'DELETE' }),
   toggleSource: (sourceId: string) => fetchJSON<{ status: string; enabled: boolean }>(`/reddit/sources/${sourceId}/toggle`, { method: 'PUT' }),
+};
+
+// ── Twitter Discovery Types ──────────────────────────────────────────
+
+export interface TwitterSource {
+  id: string;
+  source_id: string;
+  name: string;
+  query: string;
+  source_type: string;
+  enabled: boolean;
+  last_tweet_id: string | null;
+  last_collected_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TwitterDiscoveryToken {
+  rank: number;
+  chain: string;
+  token_address: string;
+  symbol: string;
+  name: string | null;
+  mention_count: number;
+  unique_user_count: number;
+  total_engagement: number;
+  authority_mentions: number;
+  total_score: number;
+  first_seen_in_window: string;
+  last_seen_in_window: string;
+  discovery_methods: string[];
+  source_names: string[];
+  dex_url: string | null;
+  pair_address: string | null;
+}
+
+export interface TwitterDiscoveryResponse {
+  window: string;
+  window_start: string;
+  window_end: string;
+  total_tokens: number;
+  total_tweets: number;
+  generated_at: string;
+  tokens: TwitterDiscoveryToken[];
+}
+
+export interface TwitterStats {
+  candidate_tokens: number;
+  total_mentions: number;
+  tweets_stored: number;
+  enabled_sources: number;
+  latest_mention_at: string | null;
+  generated_at: string;
+}
+
+export const twitterApi = {
+  getStatus: () => fetchJSON<{ configured: boolean; message: string }>('/twitter/discovery/status'),
+  getDiscovery: (params?: { window?: string; limit?: number; min_mentions?: number; min_users?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.window) sp.set('window', params.window);
+    if (params?.limit) sp.set('limit', String(params.limit));
+    if (params?.min_mentions) sp.set('min_mentions', String(params.min_mentions));
+    if (params?.min_users) sp.set('min_users', String(params.min_users));
+    const qs = sp.toString();
+    return fetchJSON<TwitterDiscoveryResponse>(`/twitter/discovery${qs ? `?${qs}` : ''}`);
+  },
+  getSources: () => fetchJSON<TwitterSource[]>('/twitter/sources'),
+  getStats: () => fetchJSON<TwitterStats>('/twitter/discovery/stats'),
+  triggerCollect: () => fetchJSON<{ status: string; message: string }>('/twitter/collect', { method: 'POST' }),
+  addSource: (query: string, name?: string, sourceType?: string) => {
+    const sp = new URLSearchParams();
+    sp.set('query', query);
+    if (name) sp.set('name', name);
+    if (sourceType) sp.set('source_type', sourceType);
+    return fetchJSON<TwitterSource>(`/twitter/sources?${sp}`, { method: 'POST' });
+  },
+  removeSource: (sourceId: string) => fetchJSON<{ status: string }>(`/twitter/sources/${sourceId}`, { method: 'DELETE' }),
+  toggleSource: (sourceId: string) => fetchJSON<{ status: string; enabled: boolean }>(`/twitter/sources/${sourceId}/toggle`, { method: 'PUT' }),
 };

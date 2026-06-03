@@ -5,6 +5,7 @@ import TokenDetail from './pages/TokenDetail';
 import Pipeline from './pages/Pipeline';
 import TelegramDiscovery from './pages/TelegramDiscovery';
 import RedditDiscovery from './pages/RedditDiscovery';
+import TwitterDiscovery from './pages/TwitterDiscovery';
 
 export const router = createBrowserRouter([
   {
@@ -16,6 +17,7 @@ export const router = createBrowserRouter([
       { path: 'pipeline', element: <Pipeline /> },
       { path: 'telegram', element: <TelegramDiscovery /> },
       { path: 'reddit', element: <RedditDiscovery /> },
+      { path: 'twitter', element: <TwitterDiscovery /> },
     ],
   },
 ]);
