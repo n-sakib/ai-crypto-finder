@@ -413,25 +413,36 @@ class TokenResolver:
         ref: ExtractedTokenReference,
     ) -> bool:
         """
-        Store a mention. Idempotent via unique constraint.
+        Store a mention. Idempotent via unique constraint check.
 
         Returns True if a new mention was created, False if duplicate.
         """
-        try:
-            mention = TelegramTokenMention(
-                candidate_token_id=candidate.id,
-                source_id=source.id,
-                telegram_message_id=message.id,
-                message_timestamp=message.message_timestamp,
-                sender_id_hash=message.sender_id_hash,
-                discovery_method=ref.discovery_method,
-                confidence=ref.confidence,
+        from sqlalchemy import exists as sql_exists
+
+        # Check for existing mention (no_autoflush to avoid triggering
+        # constraint violations from pending inserts)
+        with session.no_autoflush:
+            already_exists = await session.scalar(
+                sql_exists().where(
+                    TelegramTokenMention.candidate_token_id == candidate.id,
+                    TelegramTokenMention.telegram_message_id == message.id,
+                    TelegramTokenMention.discovery_method == ref.discovery_method,
+                ).select()
             )
-            session.add(mention)
-            return True
-        except Exception:
-            # Duplicate or constraint violation — skip
+        if already_exists:
             return False
+
+        mention = TelegramTokenMention(
+            candidate_token_id=candidate.id,
+            source_id=source.id,
+            telegram_message_id=message.id,
+            message_timestamp=message.message_timestamp,
+            sender_id_hash=message.sender_id_hash,
+            discovery_method=ref.discovery_method,
+            confidence=ref.confidence,
+        )
+        session.add(mention)
+        return True
 
     @staticmethod
     def _infer_chain(token_address: str) -> str:

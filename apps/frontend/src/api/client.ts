@@ -68,17 +68,58 @@ export interface RankingResponse {
 }
 
 export interface PipelineStatusData {
-  latest_runs: { layer_name: string; tokens_processed: number; tokens_passed: number; tokens_rejected: number }[];
-  tokens_in_pipeline: number;
-  tokens_by_status: Record<string, number>;
-  progress?: {
-    step: number;
-    layer: string;
-    status: string;
-    detail: string;
-    updated_at?: string;
-    sub_layers?: { name: string; count: number; status: string }[];
+  status: string;
+  step: string;
+  detail: string;
+  tokens: number;
+}
+
+// Unified pipeline types
+export interface UnifiedWindowData {
+  price?: number;
+  price_change?: number;
+  volume?: number;
+  buys?: number;
+  sells?: number;
+  trades?: number;
+  liquidity?: number;
+  market_cap?: number;
+  telegram?: {
+    mentions: number;
+    users: number;
+    groups: number;
+    reactions: number;
+    replies: number;
   };
+}
+
+export interface UnifiedTokenData {
+  rank: number;
+  chain: string;
+  token_address: string;
+  symbol: string | null;
+  name: string | null;
+  composite_score: number;
+  source_groups: string[];
+  group_count: number;
+  discovery_methods: string[];
+  dex_url?: string;
+  pair_address?: string;
+  dex_id?: string;
+  gmgn_score?: number;
+  gmgn_hot_level?: number;
+  windows: {
+    '5m'?: UnifiedWindowData;
+    '1h'?: UnifiedWindowData;
+    '6h'?: UnifiedWindowData;
+    '24h'?: UnifiedWindowData;
+  };
+}
+
+export interface PipelineResultsResponse {
+  total: number;
+  pipeline_status: PipelineStatusData;
+  tokens: UnifiedTokenData[];
 }
 
 export interface SystemStats {
@@ -113,7 +154,19 @@ export const api = {
   },
   getToken: (id: string) => fetchJSON<TokenDetail>(`/tokens/${id}`),
   getPipelineStatus: () => fetchJSON<PipelineStatusData>('/pipeline/status'),
-  triggerPipeline: () => fetchJSON<{ status: string; message: string }>('/pipeline/run', { method: 'POST' }),
+  getPipelineResults: (params?: { limit?: number; offset?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.limit) sp.set('limit', String(params.limit));
+    if (params?.offset) sp.set('offset', String(params.offset));
+    const qs = sp.toString();
+    return fetchJSON<PipelineResultsResponse>(`/pipeline/results${qs ? `?${qs}` : ''}`);
+  },
+  triggerPipeline: (window?: string) => {
+    const qs = window ? `?window=${window}` : '';
+    return fetchJSON<{ status: string }>(`/pipeline/run${qs}`, { method: 'POST' });
+  },
+  clearPipelineResults: () =>
+    fetchJSON<{ status: string; deleted: number }>('/pipeline/results', { method: 'DELETE' }),
   getStats: () => fetchJSON<SystemStats>('/stats'),
 };
 

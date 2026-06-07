@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, telegramApi, redditApi, twitterApi } from '../api/client';
-import type { TokenSummary, TokenDetail, RankingResponse, PipelineStatusData, SystemStats, TelegramDiscoveryResponse, TelegramSource, TelegramStats, RedditDiscoveryResponse, RedditSource, RedditStats, TwitterDiscoveryResponse, TwitterSource, TwitterStats } from '../api/client';
+import type { TokenSummary, TokenDetail, RankingResponse, PipelineStatusData, PipelineResultsResponse, SystemStats, TelegramDiscoveryResponse, TelegramSource, TelegramStats, RedditDiscoveryResponse, RedditSource, RedditStats, TwitterDiscoveryResponse, TwitterSource, TwitterStats } from '../api/client';
 
 export function useRankings() {
   return useQuery<RankingResponse>({
@@ -45,16 +45,24 @@ export function useStats() {
 export function useTriggerPipeline() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: api.triggerPipeline,
+    mutationFn: (window?: string) => api.triggerPipeline(window),
     onSuccess: () => {
-      // Delay invalidation so the async pipeline has time to finish
       setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ['pipeline-status'] });
+        qc.invalidateQueries({ queryKey: ['pipeline-results'] });
         qc.invalidateQueries({ queryKey: ['rankings'] });
         qc.invalidateQueries({ queryKey: ['tokens'] });
-        qc.invalidateQueries({ queryKey: ['pipeline-status'] });
         qc.invalidateQueries({ queryKey: ['stats'] });
       }, 5000);
     },
+  });
+}
+
+export function usePipelineResults(params?: { limit?: number; offset?: number }) {
+  return useQuery<PipelineResultsResponse>({
+    queryKey: ['pipeline-results', params],
+    queryFn: () => api.getPipelineResults(params),
+    refetchInterval: 30_000,
   });
 }
 

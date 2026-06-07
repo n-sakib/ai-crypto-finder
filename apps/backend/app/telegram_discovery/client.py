@@ -22,11 +22,38 @@ from telethon.errors import (
     FloodWaitError, ChatAdminRequiredError, ChannelPrivateError,
     ChatWriteForbiddenError,
 )
-from telethon.tl.types import Message, Channel, Chat
+from telethon.tl.types import Message, Channel, Chat, MessageEntityTextUrl
 
 from app.config import settings
 from app.telegram_discovery.models import TelegramSource, TelegramMessage, SourceType
 from app.telegram_discovery.config import TelegramSourceConfig, load_telegram_sources, load_telegram_sources_async
+
+logger = logging.getLogger(__name__)
+
+
+def _get_full_text(msg: Message) -> str:
+    """
+    Reconstruct full message text including URLs from entities.
+    
+    Telegram messages with Markdown links like [text](url) have the URL
+    stored in MessageEntityTextUrl entities but NOT in msg.message.
+    This function rebuilds the text with URLs appended so extractors
+    can find contract addresses embedded in links.
+    """
+    text = (msg.message or "").strip()
+    if not text:
+        return text
+    
+    if msg.entities:
+        # Collect URLs from text URL entities and append them
+        urls = []
+        for ent in msg.entities:
+            if isinstance(ent, MessageEntityTextUrl):
+                urls.append(ent.url)
+        if urls:
+            text = text + "\n" + "\n".join(urls)
+    
+    return text.strip()
 
 logger = logging.getLogger(__name__)
 
@@ -265,7 +292,7 @@ class TelegramClientService:
                 stats["no_tokens"] += 1
                 continue
 
-            text = msg.message.strip()
+            text = _get_full_text(msg)
             if not text:
                 stats["no_tokens"] += 1
                 continue

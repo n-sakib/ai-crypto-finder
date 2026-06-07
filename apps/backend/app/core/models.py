@@ -7,7 +7,7 @@ scores, and metadata for every candidate token.
 
 import enum
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     Column, String, Float, Integer, Boolean, DateTime, Enum,
@@ -366,3 +366,107 @@ class ManipulationFlag(Base):
     severity = Column(Float, default=0.5)  # 0–1
     evidence = Column(JSON, default=dict)
     detected_at = Column(DateTime(timezone=True), default=datetime.utcnow)
+
+
+# ── Unified Pipeline Token ─────────────────────────────────────────────
+
+class UnifiedToken(Base):
+    """Token enriched through the unified pipeline (Telegram → DexScreener → GMGN → Dedup)."""
+
+    __tablename__ = "unified_tokens"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    chain = Column(String(32), nullable=False, index=True)
+    token_address = Column(String(128), nullable=False, index=True)
+    symbol = Column(String(32), nullable=True)
+    name = Column(String(128), nullable=True)
+    logo_url = Column(String(512), nullable=True)
+
+    # DexScreener enrichment
+    dex_url = Column(String(512), nullable=True)
+    pair_address = Column(String(128), nullable=True)
+    dex_id = Column(String(32), nullable=True)
+
+    # GMGN enrichment
+    gmgn_url = Column(String(512), nullable=True)
+    gmgn_score = Column(Float, nullable=True)
+    gmgn_hot_level = Column(Integer, nullable=True)
+
+    # ── 5-minute window ──
+    price_5m = Column(Float, nullable=True)
+    price_change_5m = Column(Float, nullable=True)
+    volume_5m = Column(Float, nullable=True)
+    buys_5m = Column(Integer, nullable=True)
+    sells_5m = Column(Integer, nullable=True)
+    trades_5m = Column(Integer, nullable=True)
+    liquidity_5m = Column(Float, nullable=True)
+    market_cap_5m = Column(Float, nullable=True)
+    tg_mentions_5m = Column(Integer, default=0)
+    tg_users_5m = Column(Integer, default=0)
+    tg_groups_5m = Column(Integer, default=0)
+    tg_reactions_5m = Column(Integer, default=0)
+    tg_replies_5m = Column(Integer, default=0)
+
+    # ── 1-hour window ──
+    price_1h = Column(Float, nullable=True)
+    price_change_1h = Column(Float, nullable=True)
+    volume_1h = Column(Float, nullable=True)
+    buys_1h = Column(Integer, nullable=True)
+    sells_1h = Column(Integer, nullable=True)
+    trades_1h = Column(Integer, nullable=True)
+    liquidity_1h = Column(Float, nullable=True)
+    market_cap_1h = Column(Float, nullable=True)
+    tg_mentions_1h = Column(Integer, default=0)
+    tg_users_1h = Column(Integer, default=0)
+    tg_groups_1h = Column(Integer, default=0)
+    tg_reactions_1h = Column(Integer, default=0)
+    tg_replies_1h = Column(Integer, default=0)
+
+    # ── 6-hour window ──
+    price_6h = Column(Float, nullable=True)
+    price_change_6h = Column(Float, nullable=True)
+    volume_6h = Column(Float, nullable=True)
+    buys_6h = Column(Integer, nullable=True)
+    sells_6h = Column(Integer, nullable=True)
+    trades_6h = Column(Integer, nullable=True)
+    liquidity_6h = Column(Float, nullable=True)
+    market_cap_6h = Column(Float, nullable=True)
+    tg_mentions_6h = Column(Integer, default=0)
+    tg_users_6h = Column(Integer, default=0)
+    tg_groups_6h = Column(Integer, default=0)
+    tg_reactions_6h = Column(Integer, default=0)
+    tg_replies_6h = Column(Integer, default=0)
+
+    # ── 24-hour window ──
+    price_24h = Column(Float, nullable=True)
+    price_change_24h = Column(Float, nullable=True)
+    volume_24h = Column(Float, nullable=True)
+    buys_24h = Column(Integer, nullable=True)
+    sells_24h = Column(Integer, nullable=True)
+    trades_24h = Column(Integer, nullable=True)
+    liquidity_24h = Column(Float, nullable=True)
+    market_cap_24h = Column(Float, nullable=True)
+    tg_mentions_24h = Column(Integer, default=0)
+    tg_users_24h = Column(Integer, default=0)
+    tg_groups_24h = Column(Integer, default=0)
+    tg_reactions_24h = Column(Integer, default=0)
+    tg_replies_24h = Column(Integer, default=0)
+
+    # Ranking
+    composite_score = Column(Float, nullable=True)
+    rank = Column(Integer, nullable=True)
+
+    # Metadata
+    group_count = Column(Integer, default=0)
+    source_groups = Column(JSON, default=list)
+    discovery_methods = Column(JSON, default=list)
+    first_seen_at = Column(DateTime(timezone=True), nullable=False)
+    last_seen_at = Column(DateTime(timezone=True), nullable=False)
+    pipeline_run_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("chain", "token_address", name="uq_unified_token_chain_addr"),
+        Index("ix_unified_tokens_rank", "composite_score"),
+        Index("ix_unified_tokens_first_seen", "first_seen_at"),
+    )

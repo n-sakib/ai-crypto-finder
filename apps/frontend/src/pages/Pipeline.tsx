@@ -1,237 +1,488 @@
-import { useEffect } from 'react';
-import { Play, RefreshCw, CheckCircle, Clock, Zap, Activity, Loader2, Search, XCircle, Layers } from 'lucide-react';
-import { usePipelineStatus, useTriggerPipeline } from '../hooks/useApi';
+import { useState, useEffect, useRef } from 'react';
+import { flushSync } from 'react-dom';
+import { Play, RefreshCw, CheckCircle, Loader2, Activity, Layers, TrendingUp, Users, BarChart3, ExternalLink, ChevronDown, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
+import { usePipelineStatus, usePipelineResults, useTriggerPipeline } from '../hooks/useApi';
+import { api } from '../api/client';
+import type { UnifiedTokenData, UnifiedWindowData } from '../api/client';
 
-const LAYERS = [
-  [1,'Discovery','7 sources scan'], [2,'Token Filtering','Identity + Safety + Manipulation'],
-  [3,'Attention','Social velocity'], [4,'Market Flow','On-chain flow'], [5,'Adoption','Holder growth'],
-  [6,'Liquidity Quality','Trading health'], [7,'Smart Money','Proven wallets'], [8,'Narrative','Sector context'],
-  [9,'Price Compression','Entry timing'], [10,'Risk Score','Multi-dimension'], [11,'Early Momentum','Combined score'],
-  [12,'Ranking','Tier A/B/C'],
+const STEPS = [
+  { key: 'telegram', label: 'Telegram Scan', desc: 'Scan groups for token mentions' },
+  { key: 'dexscreener', label: 'DexScreener + GMGN', desc: 'Parallel enrich: price/volume + GMGN metrics' },
+  { key: 'dedup', label: 'Deduplication', desc: 'Merge duplicate tokens' },
+  { key: 'aggregate', label: 'Windowed Agg', desc: 'Compute 5m/1h/6h/24h buckets' },
+  { key: 'persist', label: 'Persist', desc: 'Save to database' },
 ];
 
-// Friendly names for discovery sources
-const SOURCE_NAMES: Record<string, string> = {
-  dexscreener_volume: 'DEXScreener Volume',
-  dexscreener_trending: 'DEXScreener Trending',
-  twitter: 'Twitter/X',
-  telegram: 'Telegram',
-  reddit: 'Reddit',
-  smart_wallet: 'Smart Wallet',
-  dormant_awakening: 'Dormant Awakening',
-  narrative: 'Narrative Discovery',
-};
+const WINDOWS = ['5m', '1h', '6h', '24h'] as const;
 
-// Friendly names for Token Filtering sub-steps
-const FILTERING_NAMES: Record<string, string> = {
-  identity: 'Token Identity (dedup)',
-  safety: 'Safety (honeypot / rug check)',
-  manipulation: 'Manipulation (spam / fake activity)',
-};
-
-// Friendly names for Attention sub-steps
-const ATTENTION_NAMES: Record<string, string> = {
-  twitter: 'X (Twitter) Velocity',
-  telegram: 'Telegram Velocity',
-  reddit: 'Reddit Velocity',
-  coingecko: 'Coingecko News',
-};
-
-// Static list — always visible under Discovery
-const DISCOVERY_SOURCES = Object.keys(SOURCE_NAMES);
-const FILTERING_STEPS = Object.keys(FILTERING_NAMES);
-const ATTENTION_STEPS = Object.keys(ATTENTION_NAMES);
-
-const STATS = [
-  { icon: Clock, label: 'Last Run', color: 'text-indigo-400', bg: 'bg-indigo-500/10' },
-  { icon: Search, label: 'Coins Discovered', color: 'text-green-500', bg: 'bg-green-500/10' },
-  { icon: Zap, label: 'Status', color: 'text-yellow-500', bg: 'bg-yellow-500/10' },
-  { icon: CheckCircle, label: 'Backend', color: 'text-green-500', bg: 'bg-green-500/10' },
-];
+function formatCompact(n: number | undefined | null): string {
+  if (n == null) return '—';
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(2) + 'K';
+  if (n < 0.0001 && n > 0) return n.toExponential(2);
+  return n.toFixed(n >= 1 ? 2 : 6);
+}
 
 export default function Pipeline() {
-  const { data: status, refetch } = usePipelineStatus();
+  const qc = useQueryClient();
+  const { data: status, isFetching: statusFetching } = usePipelineStatus();
+  const { data: results, isFetching: resultsFetching } = usePipelineResults({ limit: 500 });
   const trigger = useTriggerPipeline();
-  const progress = (status?.progress ?? {}) as NonNullable<typeof status>['progress'];
-  const currentStep = progress?.step ?? 0;
-  const pipelineStatus = progress?.status ?? 'idle';
-  const isRunning = pipelineStatus === 'running';
-  const isComplete = pipelineStatus === 'done' || pipelineStatus === 'completed';
+
+  const [runWindow, setRunWindow] = useState<string>('24h');
+  const [displayWindow, setDisplayWindow] = useState<string>('24h');
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [sortField, setSortField] = useState<string>('rank');
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+  const [page, setPage] = useState(0);
+  const PAGE_SIZE = 50;
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (trigger.isSuccess) {
-      refetch();
+    const handleClickOutside = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setDropdownOpen(false);
+      }
+    };
+    if (dropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
     }
-  }, [trigger.isSuccess]);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [dropdownOpen]);
 
-  const totalFound = progress?.sub_layers
-    ?.filter((s) => DISCOVERY_SOURCES.includes(s.name))
-    .reduce((sum: number, s: { count: number }) => sum + s.count, 0) ?? 0;
-  const lastRunTime = progress?.updated_at
-    ? new Date(progress.updated_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    : '—';
+  const isRunning = status?.status === 'running';
+  const isDone = status?.status === 'done';
+  const isError = status?.status === 'error';
+  const currentStep = STEPS.findIndex(s => s.key === status?.step) ?? -1;
 
-  const statValues = [
-    lastRunTime,
-    totalFound,
-    isRunning ? `Step ${currentStep}/12` : isComplete ? 'Complete' : 'Ready',
-    'Online',
-  ];
+  const handleRefresh = async () => {
+    flushSync(() => setRefreshing(true));
+    await api.clearPipelineResults();
+    qc.resetQueries({ queryKey: ['pipeline-status'] });
+    qc.resetQueries({ queryKey: ['pipeline-results'] });
+    setTimeout(() => setRefreshing(false), 1200);
+  };
+
+  const refetchData = () => {
+    qc.invalidateQueries({ queryKey: ['pipeline-status'] });
+    qc.invalidateQueries({ queryKey: ['pipeline-results'] });
+  };
+
+  const handleRun = async () => {
+    trigger.mutate(runWindow);
+
+    // Poll pipeline status until done, then refresh
+    const poll = async () => {
+      for (let i = 0; i < 120; i++) {  // max 4 minutes
+        await new Promise(r => setTimeout(r, 3000));  // every 3s
+        try {
+          const s = await api.getPipelineStatus();
+          if (s.status === 'done') {
+            refetchData();
+            return;
+          }
+          if (s.status === 'error') {
+            refetchData();
+            return;
+          }
+        } catch {
+          // API not ready yet, keep polling
+        }
+      }
+      refetchData();  // timeout — refetch anyway
+    };
+    poll();
+  };
+
+  const isRefreshing = refreshing || statusFetching || resultsFetching;
+  const hasData = results && results.tokens && results.tokens.length > 0;
+
+  const tokens = results?.tokens ?? [];
+  const totalTokens = results?.total ?? 0;
+
+  const handleSort = (field: string) => {
+    if (sortField === field) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortDir('desc');
+    }
+    setPage(0);
+  };
+
+  const sortIcon = (field: string) => {
+    if (sortField !== field) return <ArrowUpDown size={12} className="inline ml-1 opacity-30" />;
+    return sortDir === 'asc'
+      ? <ArrowUp size={12} className="inline ml-1 text-indigo-400" />
+      : <ArrowDown size={12} className="inline ml-1 text-indigo-400" />;
+  };
+
+  const displayTokens = [...tokens]
+    .sort((a, b) => {
+      const wA = (a.windows[displayWindow as keyof typeof a.windows] ?? {}) as UnifiedWindowData;
+      const wB = (b.windows[displayWindow as keyof typeof b.windows] ?? {}) as UnifiedWindowData;
+      const tgA = wA.telegram ?? { mentions: 0 };
+      const tgB = wB.telegram ?? { mentions: 0 };
+
+      let valA: number = 0, valB: number = 0;
+      switch (sortField) {
+        case 'rank': valA = a.rank; valB = b.rank; break;
+        case 'symbol': return sortDir === 'asc'
+          ? (a.symbol || '').localeCompare(b.symbol || '')
+          : (b.symbol || '').localeCompare(a.symbol || '');
+        case 'price': valA = wA.price ?? 0; valB = wB.price ?? 0; break;
+        case 'volume': valA = wA.volume ?? 0; valB = wB.volume ?? 0; break;
+        case 'trades': valA = wA.trades ?? 0; valB = wB.trades ?? 0; break;
+        case 'liquidity': valA = wA.liquidity ?? 0; valB = wB.liquidity ?? 0; break;
+        case 'mcap': valA = wA.market_cap ?? 0; valB = wB.market_cap ?? 0; break;
+        case 'tg': valA = tgA.mentions; valB = tgB.mentions; break;
+        case 'groups': valA = a.group_count ?? 0; valB = b.group_count ?? 0; break;
+        default: valA = a.rank; valB = b.rank;
+      }
+      return sortDir === 'asc' ? valA - valB : valB - valA;
+    });
+
+  const totalPages = Math.ceil(displayTokens.length / PAGE_SIZE);
+  const pagedTokens = displayTokens.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
   return (
-    <div className="max-w-5xl mx-auto px-4 py-6">
+    <div className="max-w-7xl mx-auto px-4 py-6">
       <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-3 text-[#e4e4e7]"><Activity size={24} className="text-indigo-400"/>Pipeline</h1>
+          <h1 className="text-2xl font-bold flex items-center gap-3 text-[#e4e4e7]">
+            <Activity size={24} className="text-indigo-400" />
+            Unified Pipeline
+          </h1>
           <p className="text-sm mt-1 text-[#71717a]">
-            12-layer analysis · Auto-refreshes
-            {isRunning && <span className="ml-2 text-indigo-400 flex items-center gap-1 inline-flex"><Loader2 size={12} className="animate-spin"/>Running...</span>}
+            Telegram → DexScreener → GMGN → Dedup → Persist
+            {isRunning && (
+              <span className="ml-2 text-indigo-400 inline-flex items-center gap-1">
+                <Loader2 size={12} className="animate-spin" />Running...
+              </span>
+            )}
+            {isDone && (
+              <span className="ml-2 text-green-400 inline-flex items-center gap-1">
+                <CheckCircle size={12} />Complete · {totalTokens} tokens
+              </span>
+            )}
           </p>
         </div>
-        <div className="flex gap-2">
-          <button onClick={()=>refetch()} className="px-4 py-2 rounded-lg text-sm font-medium bg-[#13131a] border border-[#1e1e2e] text-[#71717a] hover:text-[#e4e4e7] flex items-center gap-2"><RefreshCw size={14}/>Refresh</button>
-          <button onClick={()=>trigger.mutate()} disabled={isRunning} className="px-5 py-2 rounded-lg text-sm font-semibold bg-gradient-to-r from-indigo-500 to-purple-500 text-white flex items-center gap-2 shadow-lg shadow-indigo-500/20 disabled:opacity-60 transition-all">
-            {isRunning ? <Loader2 size={14} className="animate-spin"/> : <Play size={14} fill="white"/>}
-            {isRunning ? 'Pipeline Running...' : 'Run Full Pipeline'}
+        <div className="flex items-center gap-2">
+          <button onClick={handleRefresh}
+            className="px-3 py-2 rounded-lg text-sm font-medium bg-[#13131a] border border-[#1e1e2e] text-[#71717a] hover:text-[#e4e4e7] flex items-center gap-1.5 disabled:opacity-50"
+            title="Refresh"
+            disabled={isRefreshing}>
+            <RefreshCw size={14} className={isRefreshing ? 'animate-spin' : ''} />
           </button>
+
+          {/* Split button: Run + dropdown */}
+          <div className="relative" ref={dropdownRef}>
+            <div className="flex">
+              <button onClick={handleRun} disabled={isRunning}
+                className="px-5 py-2 rounded-l-lg text-sm font-semibold bg-gradient-to-r from-indigo-500 to-purple-500 text-white flex items-center gap-2 shadow-lg shadow-indigo-500/20 disabled:opacity-60 transition-all">
+                {isRunning ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} fill="white" />}
+                {isRunning ? 'Running...' : `Run (${runWindow})`}
+              </button>
+              <button
+                onClick={() => setDropdownOpen(!dropdownOpen)}
+                disabled={isRunning}
+                className="px-2 py-2 rounded-r-lg bg-gradient-to-r from-indigo-500 to-purple-500 text-white border-l border-white/20 flex items-center shadow-lg shadow-indigo-500/20 disabled:opacity-60 transition-all"
+              >
+                <ChevronDown size={14} className={`transition-transform ${dropdownOpen ? 'rotate-180' : ''}`} />
+              </button>
+            </div>
+            {dropdownOpen && (
+              <div className="absolute right-0 mt-2 w-32 bg-[#18181b] border border-[#27272a] rounded-lg shadow-xl z-50 overflow-hidden">
+                {WINDOWS.map(w => (
+                  <button
+                    key={w}
+                    onClick={() => { setRunWindow(w); setDropdownOpen(false); }}
+                    className={`w-full text-left px-4 py-2.5 text-sm font-medium transition-colors flex items-center justify-between ${
+                      runWindow === w
+                        ? 'bg-indigo-500/10 text-indigo-400'
+                        : 'text-[#a1a1aa] hover:bg-[#27272a] hover:text-[#e4e4e7]'
+                    }`}
+                  >
+                    {w}
+                    {runWindow === w && <span className="text-indigo-400 text-xs">✓</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
+
+      {isError && (
+        <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4 mb-6">
+          <p className="text-sm text-red-400 whitespace-pre-wrap line-clamp-4">{status?.detail}</p>
+        </div>
+      )}
 
       {isRunning && (
         <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-xl p-4 mb-6">
-          <div className="flex items-center gap-3">
-            <Loader2 size={20} className="animate-spin text-indigo-400"/>
+          <div className="flex items-center gap-3 mb-3">
+            <Loader2 size={20} className="animate-spin text-indigo-400" />
             <div className="flex-1">
               <div className="text-sm font-semibold text-indigo-400">
-                Step {currentStep}/12: {progress?.layer ?? '...'}
+                {status?.step ? STEPS.find(s => s.key === status.step)?.label ?? status.step : 'Starting...'}
               </div>
-              <div className="text-xs text-[#71717a] mt-0.5">{progress?.detail || 'Processing...'}</div>
+              <div className="text-xs text-[#71717a] mt-0.5">{status?.detail}</div>
             </div>
-            <div className="text-xs text-[#71717a]">{(currentStep/12*100).toFixed(0)}%</div>
+            <div className="text-xs text-[#71717a]">{status?.tokens} tokens</div>
           </div>
-          <div className="h-1.5 rounded-full bg-[#1e1e2e] mt-3 overflow-hidden">
-            <div className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 rounded-full transition-all duration-500" style={{ width: `${(currentStep/12)*100}%` }}/>
+          <div className="flex gap-1.5">
+            {STEPS.map((s, i) => {
+              const done = currentStep > i;
+              const active = currentStep === i;
+              return (
+                <div key={s.key}
+                  className={`flex-1 h-1.5 rounded-full transition-all ${
+                    done ? 'bg-green-500' : active ? 'bg-indigo-500 animate-pulse' : 'bg-[#1e1e2e]'
+                  }`}
+                  title={s.label} />
+              );
+            })}
           </div>
         </div>
       )}
 
-      {isComplete && (
-        <div className="bg-green-500/10 border border-green-500/20 rounded-xl p-4 mb-6">
-          <div className="flex items-center gap-3">
-            <CheckCircle size={20} className="text-green-400"/>
-            <div className="flex-1">
-              <div className="text-sm font-semibold text-green-400">Pipeline Complete</div>
-              <div className="text-xs text-[#71717a] mt-0.5">{progress?.detail || 'All 12 layers finished.'}</div>
-            </div>
-          </div>
+      {/* Full-page loading overlay while refreshing */}
+      {refreshing ? (
+        <div className="flex flex-col items-center justify-center py-20 gap-4">
+          <Loader2 size={36} className="animate-spin text-indigo-400" />
+          <p className="text-sm text-[#71717a]">Refreshing pipeline data...</p>
         </div>
-      )}
-
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
-        {STATS.map((s, i) => (
-          <div key={s.label} className="bg-[#13131a] border border-[#1e1e2e] rounded-xl p-4 flex items-center gap-3">
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${s.bg}`}><s.icon size={18} className={s.color}/></div>
-            <div><div className="text-xs text-[#71717a]">{s.label}</div><div className="text-lg font-bold text-[#e4e4e7]">{statValues[i]}</div></div>
-          </div>
-        ))}
-      </div>
-
-      <h2 className="text-sm font-semibold mb-4 flex items-center gap-2 text-[#e4e4e7]"><Layers size={16}/>Pipeline Layers</h2>
-      <div className="space-y-1">
-        {LAYERS.map(([num, name, desc]) => {
-          const n = num as number;
-          const isDone = isComplete || currentStep > n;
-          const isCurrent = !isComplete && currentStep === n;
-          const subLayers = progress?.sub_layers;
-          const runMap = new Map<string, { count: number; status: string }>();
-          if (subLayers) {
-            for (const sl of subLayers) {
-              runMap.set(sl.name, sl);
-            }
-          }
-
-          // Determine sub-items for this layer
-          let subKeys: string[] = [];
-          let subNames: Record<string, string> = {};
-          let subLabel = '';
-          if (n === 1) { subKeys = DISCOVERY_SOURCES; subNames = SOURCE_NAMES; subLabel = 'found'; }
-          if (n === 2) { subKeys = FILTERING_STEPS; subNames = FILTERING_NAMES; subLabel = 'passed'; }
-          if (n === 3) { subKeys = ATTENTION_STEPS; subNames = ATTENTION_NAMES; subLabel = 'tracked'; }
-          const showSubs = subKeys.length > 0;
-          const totalSub = subKeys.reduce((sum, k) => sum + (runMap.get(k)?.count ?? 0), 0);
-
-          return (
-            <div key={n}>
-              <div className={`bg-[#13131a] border rounded-xl p-4 flex items-center gap-4 transition-all ${
-                isCurrent ? 'border-indigo-500/50 shadow-lg shadow-indigo-500/10' : isDone ? 'border-green-500/20' : 'border-[#1e1e2e]'
-              }`}>
-                <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold shrink-0 ${
-                  isCurrent ? 'bg-gradient-to-br from-indigo-500 to-purple-500 text-white animate-pulse' :
-                  isDone ? 'bg-green-500/20 text-green-500' :
-                  'bg-[#1e1e2e] text-[#71717a]'
+      ) : (
+        <div>
+          <div className="grid grid-cols-3 gap-3 mb-6">
+            {[
+              { icon: TrendingUp, color: 'indigo', label: 'Total Tokens Found', value: isRefreshing ? '—' : totalTokens },
+              { icon: BarChart3, color: 'purple', label: 'Total Volume', value: isRefreshing ? '—' : formatCompact(tokens.reduce((sum, t) => sum + (t.windows[displayWindow as keyof typeof t.windows]?.volume ?? 0), 0)) },
+              { icon: Users, color: 'green', label: 'Total Trades', value: isRefreshing ? '—' : tokens.reduce((sum, t) => sum + (t.windows[displayWindow as keyof typeof t.windows]?.trades ?? 0), 0) },
+            ].map((s) => (
+              <div key={s.label} className={`bg-[#13131a] border border-[#1e1e2e] rounded-xl p-4 flex items-center gap-3 ${isRefreshing ? 'opacity-40' : ''}`}>
+                <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
+                  s.color === 'indigo' ? 'bg-indigo-500/10' : s.color === 'purple' ? 'bg-purple-500/10' : 'bg-green-500/10'
                 }`}>
-                  {isDone ? <CheckCircle size={14}/> : isCurrent ? <Loader2 size={14} className="animate-spin"/> : n}
+                  <s.icon size={20} className={
+                    s.color === 'indigo' ? 'text-indigo-400' : s.color === 'purple' ? 'text-purple-400' : 'text-green-400'
+                  } />
                 </div>
-                <div className="flex-1">
-                  <div className={`text-sm font-semibold ${isCurrent ? 'text-indigo-400' : isDone ? 'text-green-500' : 'text-[#71717a]'}`}>
-                    {name as string}
-                    {showSubs && isDone && totalSub > 0 && (
-                      <span className="ml-2 text-xs text-green-400">({totalSub} {subLabel})</span>
-                    )}
-                  </div>
-                  <div className="text-xs text-[#71717a]">{desc as string}</div>
-                </div>
-                <div className="flex items-center gap-1 text-xs">
-                  {isCurrent ? (
-                    <span className="text-indigo-400 flex items-center gap-1"><Loader2 size={10} className="animate-spin"/>Running</span>
-                  ) : isDone ? (
-                    <span className="text-green-500 flex items-center gap-1"><CheckCircle size={10}/>Done</span>
-                  ) : (
-                    <span className="text-[#71717a] flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-[#1e1e2e]"/>Pending</span>
-                  )}
+                <div>
+                  <div className="text-xs text-[#71717a]">{s.label}</div>
+                  <div className="text-lg font-bold text-[#e4e4e7]">{s.value}</div>
                 </div>
               </div>
+            ))}
+          </div>
 
-              {/* Sub-layers: always show, with counts when available */}
-              {showSubs && (
-                <div className="ml-8 mt-0.5 space-y-0.5 border-l border-[#1e1e2e] pl-4">
-                  {subKeys.map((key) => {
-                    const run = runMap.get(key);
-                    const hasRun = !!run;
-                    const done = hasRun && run.status === 'done';
-                    const failed = hasRun && run.status === 'failed';
-                    return (
-                      <div key={key} className="flex items-center gap-3 py-1.5 px-3 rounded-lg bg-[#0a0a10]/50">
-                        {isCurrent ? (
-                          <Loader2 size={12} className="text-indigo-400 animate-spin"/>
-                        ) : done ? (
-                          <Search size={12} className="text-green-500"/>
-                        ) : failed ? (
-                          <XCircle size={12} className="text-red-500"/>
-                        ) : (
-                          <div className="w-3 h-3 rounded-full border border-[#1e1e2e]"/>
-                        )}
-                        <span className="text-xs text-[#a1a1aa] flex-1">
-                          {subNames[key] || key}
-                        </span>
-                        {isCurrent ? (
-                          <span className="text-xs text-indigo-400">processing…</span>
-                        ) : done ? (
-                          <span className="text-xs text-green-500 font-mono">{run.count} {subLabel}</span>
-                        ) : failed ? (
-                          <span className="text-xs text-red-500">failed</span>
-                        ) : (
-                          <span className="text-xs text-[#52525b]">—</span>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+      <h2 className="text-sm font-semibold mb-3 flex items-center gap-2 text-[#e4e4e7]">
+        <Layers size={16} />Pipeline Steps
+      </h2>
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 mb-8">
+        {STEPS.map((s, i) => {
+          const done = isDone || (isRunning && currentStep > i);
+          const active = isRunning && currentStep === i;
+          return (
+            <div key={s.key}
+              className={`rounded-xl p-3 border text-center transition-all ${
+                done ? 'border-green-500/30 bg-green-500/5' :
+                active ? 'border-indigo-500/50 bg-indigo-500/10' :
+                'border-[#1e1e2e] bg-[#13131a]'
+              }`}>
+              <div className={`text-lg mb-1 ${
+                done ? 'text-green-400' : active ? 'text-indigo-400' : 'text-[#52525b]'
+              }`}>
+                {done ? <CheckCircle size={18} className="mx-auto" /> :
+                 active ? <Loader2 size={18} className="mx-auto animate-spin" /> :
+                 <span className="text-xs">{i + 1}</span>}
+              </div>
+              <div className={`text-xs font-semibold ${done ? 'text-green-400' : active ? 'text-indigo-400' : 'text-[#71717a]'}`}>
+                {s.label}
+              </div>
+              <div className="text-[10px] text-[#52525b] mt-0.5">{s.desc}</div>
             </div>
           );
         })}
       </div>
+
+      {tokens.length > 0 && (
+        <>
+          <div className="flex items-center gap-2 mb-4">
+            <span className="text-sm text-[#71717a]">Time window:</span>
+            {WINDOWS.map(w => (
+              <button key={w} onClick={() => setDisplayWindow(w)}
+                className={`px-3 py-1 rounded-lg text-xs font-semibold transition-all ${
+                  displayWindow === w
+                    ? 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/30'
+                    : 'bg-[#13131a] border border-[#1e1e2e] text-[#71717a] hover:text-[#e4e4e7]'
+                }`}>
+                {w}
+              </button>
+            ))}
+          </div>
+
+          <div className="bg-[#13131a] border border-[#1e1e2e] rounded-xl overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[#1e1e2e] text-xs text-[#71717a]">
+                    <th className="text-left px-4 py-3 w-10 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('rank')}>
+                      #{sortIcon('rank')}
+                    </th>
+                    <th className="text-left px-4 py-3 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('symbol')}>
+                      Token{sortIcon('symbol')}
+                    </th>
+                    <th className="text-right px-4 py-3 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('price')}>
+                      Price{sortIcon('price')}
+                    </th>
+                    <th className="text-right px-4 py-3 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('volume')}>
+                      Volume{sortIcon('volume')}
+                    </th>
+                    <th className="text-right px-4 py-3 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('trades')}>
+                      Trades{sortIcon('trades')}
+                    </th>
+                    <th className="text-right px-4 py-3 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('liquidity')}>
+                      Liquidity{sortIcon('liquidity')}
+                    </th>
+                    <th className="text-right px-4 py-3 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('mcap')}>
+                      MCap{sortIcon('mcap')}
+                    </th>
+                    <th className="text-right px-4 py-3 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('tg')}>
+                      TG{sortIcon('tg')}
+                    </th>
+                    <th className="text-right px-4 py-3 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('groups')}>
+                      Groups{sortIcon('groups')}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pagedTokens.map((token: UnifiedTokenData) => {
+                    const w = (token.windows[displayWindow as keyof typeof token.windows] ?? {}) as UnifiedWindowData;
+                    const tg = w.telegram ?? { mentions: 0, users: 0, groups: 0 };
+                    return (
+                      <tr key={`${token.chain}:${token.token_address}`}
+                        className="border-b border-[#1e1e2e] hover:bg-[#1a1a24] transition-colors">
+                        <td className="px-4 py-3">
+                          <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${
+                            token.rank <= 3 ? 'bg-yellow-500/20 text-yellow-400' :
+                            token.rank <= 10 ? 'bg-indigo-500/20 text-indigo-400' :
+                            'text-[#71717a]'
+                          }`}>{token.rank}</span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="font-semibold text-[#e4e4e7]">
+                            {token.symbol || token.token_address.slice(0, 8)}
+                          </div>
+                          <div className="text-xs text-[#52525b]">
+                            {token.chain}
+                            {token.dex_url && (
+                              <a href={token.dex_url} target="_blank" rel="noopener noreferrer" className="ml-1 inline-flex text-indigo-400 hover:text-indigo-300">
+                                <ExternalLink size={10} />
+                              </a>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono text-[#e4e4e7]">${formatCompact(w.price)}</td>
+                        <td className="px-4 py-3 text-right font-mono text-[#e4e4e7]">${formatCompact(w.volume)}</td>
+                        <td className="px-4 py-3 text-right font-mono text-[#71717a]">{formatCompact(w.trades)}</td>
+                        <td className="px-4 py-3 text-right font-mono text-[#71717a]">${formatCompact(w.liquidity)}</td>
+                        <td className="px-4 py-3 text-right font-mono text-[#71717a]">${formatCompact(w.market_cap)}</td>
+                        <td className="px-4 py-3 text-right font-mono">
+                          <span className="text-[#e4e4e7]">{tg.mentions}</span>
+                          <span className="text-[#52525b] ml-1">/ {tg.groups}g</span>
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono">
+                          <span className={`text-sm font-bold px-2 py-0.5 rounded ${
+                            token.group_count >= 5 ? 'bg-green-500/20 text-green-400' :
+                            token.group_count >= 2 ? 'bg-indigo-500/20 text-indigo-400' :
+                            'bg-[#1e1e2e] text-[#71717a]'
+                          }`}>
+                            {token.group_count ?? 0}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div className="flex items-center justify-between mt-3 text-xs text-[#52525b]">
+            <span>
+              Showing {pagedTokens.length > 0 ? page * PAGE_SIZE + 1 : 0}–{Math.min((page + 1) * PAGE_SIZE, displayTokens.length)} of {displayTokens.length} tokens
+              {displayTokens.length < totalTokens && ` (${totalTokens} total in DB)`}
+            </span>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setPage(0)}
+                disabled={page === 0}
+                className="px-2 py-1 rounded bg-[#1e1e2e] hover:bg-[#27272a] disabled:opacity-30 disabled:cursor-not-allowed"
+              >««</button>
+              <button
+                onClick={() => setPage(p => Math.max(0, p - 1))}
+                disabled={page === 0}
+                className="px-2 py-1 rounded bg-[#1e1e2e] hover:bg-[#27272a] disabled:opacity-30 disabled:cursor-not-allowed"
+              >«</button>
+              {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
+                let pageNum: number;
+                if (totalPages <= 7) {
+                  pageNum = i;
+                } else if (page < 3) {
+                  pageNum = i;
+                } else if (page > totalPages - 4) {
+                  pageNum = totalPages - 7 + i;
+                } else {
+                  pageNum = page - 3 + i;
+                }
+                return (
+                  <button
+                    key={pageNum}
+                    onClick={() => setPage(pageNum)}
+                    className={`px-2 py-1 rounded ${
+                      pageNum === page
+                        ? 'bg-indigo-500/20 text-indigo-400'
+                        : 'bg-[#1e1e2e] hover:bg-[#27272a]'
+                    }`}
+                  >{pageNum + 1}</button>
+                );
+              })}
+              <button
+                onClick={() => setPage(p => Math.min(totalPages - 1, p + 1))}
+                disabled={page >= totalPages - 1}
+                className="px-2 py-1 rounded bg-[#1e1e2e] hover:bg-[#27272a] disabled:opacity-30 disabled:cursor-not-allowed"
+              >»</button>
+              <button
+                onClick={() => setPage(totalPages - 1)}
+                disabled={page >= totalPages - 1}
+                className="px-2 py-1 rounded bg-[#1e1e2e] hover:bg-[#27272a] disabled:opacity-30 disabled:cursor-not-allowed"
+              >»»</button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {!isRunning && tokens.length === 0 && !isError && (
+        <div className="bg-[#13131a] border border-[#1e1e2e] rounded-xl p-12 text-center">
+          <div className="w-16 h-16 rounded-full bg-indigo-500/10 flex items-center justify-center mx-auto mb-4">
+            <Play size={24} className="text-indigo-400" />
+          </div>
+          <h3 className="text-lg font-semibold text-[#e4e4e7] mb-2">No Pipeline Data Yet</h3>
+          <p className="text-sm text-[#71717a] mb-4 max-w-md mx-auto">
+            Run the unified pipeline to scan Telegram groups, enrich tokens via DexScreener & GMGN, and rank them.
+          </p>
+          <button onClick={handleRun}
+            className="px-5 py-2 rounded-lg text-sm font-semibold bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/20">
+            Run Pipeline
+          </button>
+        </div>
+      )}
+        </div>
+      )}
     </div>
   );
 }

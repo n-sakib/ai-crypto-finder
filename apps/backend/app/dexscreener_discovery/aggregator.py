@@ -1,4 +1,4 @@
-"""DexScreener Discovery Aggregator."""
+"""DexScreener Discovery Aggregator — ranks by window-specific metrics."""
 
 from __future__ import annotations
 
@@ -25,6 +25,17 @@ def parse_window(window_str: str) -> timedelta:
         return timedelta(days=value)
     return timedelta(hours=1)
 
+# Map window → (volume_column, price_change_column)
+WINDOW_METRICS = {
+    "5m": ("volume_5m", "price_change_5m"),
+    "30m": ("volume_5m", "price_change_5m"),  # 5m is closest
+    "15m": ("volume_5m", "price_change_5m"),
+    "1h": ("volume_1h", "price_change_1h"),
+    "60m": ("volume_1h", "price_change_1h"),
+    "6h": ("volume_6h", "price_change_6h"),
+    "24h": ("volume_24h", "price_change_24h"),
+}
+
 
 class DexScreenerDiscoveryAggregator:
     def __init__(self, min_volume: float = 0):
@@ -41,18 +52,17 @@ class DexScreenerDiscoveryAggregator:
         window_start = now - window_delta
         window_end = now
 
-        # Boosted tokens first, then by volume
+        vol_col, price_col = WINDOW_METRICS.get(window, ("volume_1h", "price_change_1h"))
+        vol_attr = getattr(DexScreenerToken, vol_col)
+
+        # Rank by window-specific volume: only show tokens with volume in this window
         query = (
             select(DexScreenerToken)
-            .where(
-                DexScreenerToken.last_seen_at >= window_start,
-                DexScreenerToken.last_seen_at < window_end,
-            )
-            .where(DexScreenerToken.volume_24h >= self.min_volume)
+            .where(func.coalesce(vol_attr, 0) >= self.min_volume)
+            .where(func.coalesce(vol_attr, 0) > 0)  # must have activity in this window
             .order_by(
                 desc(DexScreenerToken.is_boosted),
-                desc(func.coalesce(DexScreenerToken.volume_5m, 0)),
-                desc(func.coalesce(DexScreenerToken.volume_24h, 0)),
+                desc(func.coalesce(vol_attr, 0)),
             )
             .limit(limit)
         )
@@ -61,10 +71,13 @@ class DexScreenerDiscoveryAggregator:
 
         items = []
         for rank_idx, token in enumerate(tokens, start=1):
+            vol_val = getattr(token, vol_col) or 0
+            price_val = getattr(token, price_col) or 0
             score = (
-                (token.volume_24h or 0) * 0.4 +
-                (token.txns_5m_buys or 0) * 0.3 +
+                vol_val * 0.5 +
+                (token.txns_5m_buys or 0) * 0.2 +
                 (token.liquidity_usd or 0) * 0.2 +
+                price_val * 0.1 +
                 (10 if token.is_boosted else 0)
             )
             items.append(DexScreenerDiscoveryItem(

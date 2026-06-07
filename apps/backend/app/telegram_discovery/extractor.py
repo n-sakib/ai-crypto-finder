@@ -30,11 +30,12 @@ logger = logging.getLogger(__name__)
 # ── Compiled Regex Patterns ────────────────────────────────────────────
 
 # EVM address: 0x followed by exactly 40 hex characters
-EVM_ADDRESS_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
+# Uses lookbehind/lookahead to also match addresses in URLs (after / or -)
+EVM_ADDRESS_RE = re.compile(r"(?:^|[^a-zA-Z0-9])(0x[a-fA-F0-9]{40})(?:$|[^a-zA-Z0-9])")
 
 # Solana-style address: base58 string, 32-44 chars
-# Excludes common non-address patterns (URLs, etc.)
-SOLANA_ADDRESS_RE = re.compile(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b")
+# Uses non-word-boundary matching to capture addresses in URLs (/solana/ADDR, SOL-ADDR)
+SOLANA_ADDRESS_RE = re.compile(r"(?:^|[^a-zA-Z0-9])([1-9A-HJ-NP-Za-km-z]{32,44})(?:$|[^a-zA-Z0-9])")
 
 # Cashtags: $ followed by 2-15 uppercase/lowercase alphanumeric chars
 CASHTAG_RE = re.compile(r"\$([A-Za-z]{2,15})\b")
@@ -160,12 +161,12 @@ class TokenExtractor:
     # ── Private Extraction Methods ────────────────────────────────────
 
     def _extract_evm_addresses(self, text: str) -> list[ExtractedTokenReference]:
-        """Extract EVM contract addresses (0x...)."""
+        """Extract EVM contract addresses (0x...), including from URLs."""
         refs: list[ExtractedTokenReference] = []
         seen: set[str] = set()
 
         for match in EVM_ADDRESS_RE.finditer(text):
-            addr = match.group(0).lower()
+            addr = match.group(1).lower()  # group 1 is the address only
             if addr in seen:
                 continue
             seen.add(addr)
@@ -173,27 +174,23 @@ class TokenExtractor:
             refs.append(ExtractedTokenReference(
                 discovery_method=DiscoveryMethod.CONTRACT_ADDRESS,
                 confidence=DiscoveryConfidence.VERY_HIGH,
-                chain=None,  # Will be resolved by chain detection
+                chain=None,
                 token_address=addr,
-                raw_value=match.group(0),
+                raw_value=addr,
             ))
 
         return refs
 
     def _extract_solana_addresses(self, text: str) -> list[ExtractedTokenReference]:
-        """Extract Solana-style base58 addresses."""
+        """Extract Solana-style base58 addresses, including from URLs."""
         refs: list[ExtractedTokenReference] = []
         seen: set[str] = set()
 
         for match in SOLANA_ADDRESS_RE.finditer(text):
-            candidate = match.group(0)
+            candidate = match.group(1)  # group 1 is the address only
 
             # Skip if it looks like a common word
             if NON_ADDRESS_WORDS.match(candidate):
-                continue
-
-            # Skip if part of a URL
-            if self._is_part_of_url(text, match.start(), match.end()):
                 continue
 
             if candidate in seen:

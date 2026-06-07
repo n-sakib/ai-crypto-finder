@@ -39,6 +39,10 @@ router.include_router(gmgn_discovery_router)
 # Include DexScreener discovery sub-router
 router.include_router(dexscreener_discovery_router)
 
+# Include Unified Pipeline sub-router
+from app.api.unified_pipeline import router as unified_pipeline_router
+router.include_router(unified_pipeline_router)
+
 # ── Token Endpoints ────────────────────────────────────────────────────
 
 @router.get("/tokens", response_model=list[TokenSummary])
