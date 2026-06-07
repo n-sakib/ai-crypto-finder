@@ -19,6 +19,8 @@ from app.core.schemas import (
 from app.telegram_discovery.api import router as telegram_discovery_router
 from app.reddit_discovery.api import router as reddit_discovery_router
 from app.twitter_discovery.api import router as twitter_discovery_router
+from app.gmgn_discovery.api import router as gmgn_discovery_router
+from app.dexscreener_discovery.api import router as dexscreener_discovery_router
 
 router = APIRouter()
 
@@ -30,6 +32,12 @@ router.include_router(reddit_discovery_router)
 
 # Include Twitter discovery sub-router
 router.include_router(twitter_discovery_router)
+
+# Include GMGN discovery sub-router
+router.include_router(gmgn_discovery_router)
+
+# Include DexScreener discovery sub-router
+router.include_router(dexscreener_discovery_router)
 
 # ── Token Endpoints ────────────────────────────────────────────────────
 

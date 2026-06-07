@@ -116,7 +116,20 @@ async def main() -> None:
                     stats["tokens_resolved"] += len([r for r in refs if r.token_address or r.symbol])
                     stats["mentions_created"] += mentions
 
-            await session.commit()
+            # Commit with deadlock retry (concurrent discovery reads can cause
+            # deadlocks on the telegram_sources UPDATE batch)
+            for attempt in range(3):
+                try:
+                    with session.no_autoflush:
+                        await session.commit()
+                    break
+                except Exception as commit_err:
+                    if "deadlock" in str(commit_err).lower() and attempt < 2:
+                        await session.rollback()
+                        logger.warning("Deadlock on commit, retrying (%d/3)...", attempt + 1)
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                    else:
+                        raise
             logger.info(
                 "Resolved tokens: %d references → %d mentions created",
                 stats["tokens_extracted"], stats["mentions_created"],

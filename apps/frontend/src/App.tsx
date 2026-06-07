@@ -1,5 +1,5 @@
 import { Outlet, Link, useLocation } from 'react-router-dom';
-import { BarChart3, Activity, Radio, MessageCircle, TrendingUp } from 'lucide-react';
+import { BarChart3, Activity, Radio, MessageCircle, TrendingUp, Zap, Flame } from 'lucide-react';
 
 export default function App() {
   const location = useLocation();
@@ -10,6 +10,8 @@ export default function App() {
     { to: '/telegram', icon: Radio, label: 'Telegram' },
     { to: '/reddit', icon: MessageCircle, label: 'Reddit' },
     { to: '/twitter', icon: TrendingUp, label: 'Twitter' },
+    { to: '/gmgn', icon: Zap, label: 'GMGN' },
+    { to: '/dexscreener', icon: Flame, label: 'DexScreener' },
   ];
 
   return (

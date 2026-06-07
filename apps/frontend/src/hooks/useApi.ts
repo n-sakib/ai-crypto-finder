@@ -60,7 +60,7 @@ export function useTriggerPipeline() {
 
 // ── Telegram Discovery Hooks ─────────────────────────────────────────
 
-export function useTelegramDiscovery(params?: { window?: string; limit?: number; min_mentions?: number; min_users?: number }) {
+export function useTelegramDiscovery(params?: { window?: string; limit?: number; min_mentions?: number; min_groups?: number; min_unique_users?: number }) {
   return useQuery<TelegramDiscoveryResponse>({
     queryKey: ['telegram-discovery', params],
     queryFn: () => telegramApi.getDiscovery(params),

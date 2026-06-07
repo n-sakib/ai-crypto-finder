@@ -27,9 +27,9 @@ def run_dexscreener_discovery():
 def run_twitter_discovery():
     """Run Twitter/X discovery (hourly).
 
-    Uses twikit (free scraping) to search for cashtag mentions and contract
-    addresses. Filters by mention velocity > 3x baseline.
-    Requires TWITTER_USERNAME + TWITTER_PASSWORD in .env; skips gracefully if absent.
+    Processes candidates scraped by collect_twitter_playwright.py (host machine).
+    Reads pending candidates from Redis, filters by mention velocity > 1.5x baseline.
+    No auth required — uses public X profile pages.
     """
     logger.info("Running Twitter discovery...")
     try:

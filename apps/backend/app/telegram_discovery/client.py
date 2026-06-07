@@ -253,6 +253,7 @@ class TelegramClientService:
         from app.telegram_discovery.extractor import TokenExtractor
         extractor = TokenExtractor()
 
+        msg_count = 0
         for msg in messages:
             if not isinstance(msg, Message) or not msg.message:
                 stats["no_tokens"] += 1
@@ -292,8 +293,32 @@ class TelegramClientService:
                 stats["duplicates"] += 1
                 continue
 
-            # Store message
+            # Store message with social indicators
             raw_text = text if self._store_raw_text else None
+
+            # Extract social indicators from Telethon message
+            reactions_count = 0
+            if msg.reactions:
+                try:
+                    reactions_count = sum(
+                        getattr(rc, 'count', 0) or 0
+                        for rc in (msg.reactions.results or [])
+                    )
+                except Exception:
+                    pass
+            views_count = getattr(msg, 'views', 0) or 0
+            forwards_count = getattr(msg, 'forwards', 0) or 0
+            reply_count = getattr(msg.replies, 'replies', 0) if msg.replies else 0
+
+            # Debug: log social indicators for first 5 stored messages per source
+            if msg_count < 5:
+                logger.debug(
+                    f"[social] source={source.name} msg_id={msg.id} "
+                    f"reactions={reactions_count} views={views_count} "
+                    f"forwards={forwards_count} replies={reply_count}"
+                )
+                msg_count += 1
+
             db_msg = TelegramMessage(
                 source_id=source.id,
                 telegram_message_id=msg.id,
@@ -301,6 +326,10 @@ class TelegramClientService:
                 sender_id_hash=sender_hash,
                 text_hash=text_hash,
                 raw_text=raw_text,
+                reactions_count=reactions_count,
+                views_count=views_count,
+                forwards_count=forwards_count,
+                reply_count=reply_count,
             )
             session.add(db_msg)
             stats["processed"] += 1

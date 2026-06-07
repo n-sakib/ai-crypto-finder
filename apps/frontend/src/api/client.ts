@@ -141,12 +141,21 @@ export interface TelegramDiscoveryToken {
   mention_count: number;
   unique_user_count: number;
   group_count: number;
+  total_reactions: number;
+  total_views: number;
+  total_forwards: number;
   first_seen_in_window: string;
   last_seen_in_window: string;
   discovery_methods: string[];
   source_names: string[];
+  source_mentions: Record<string, number>;
   dex_url: string | null;
   pair_address: string | null;
+  ai_decision: string | null;
+  ai_confidence: number | null;
+  ai_reasoning: string | null;
+  ai_red_flags: string[];
+  ai_positive_signals: string[];
 }
 
 export interface TelegramDiscoveryResponse {
@@ -169,12 +178,13 @@ export interface TelegramStats {
 }
 
 export const telegramApi = {
-  getDiscovery: (params?: { window?: string; limit?: number; min_mentions?: number; min_users?: number }) => {
+  getDiscovery: (params?: { window?: string; limit?: number; min_mentions?: number; min_groups?: number; min_unique_users?: number }) => {
     const sp = new URLSearchParams();
     if (params?.window) sp.set('window', params.window);
     if (params?.limit) sp.set('limit', String(params.limit));
     if (params?.min_mentions) sp.set('min_mentions', String(params.min_mentions));
-    if (params?.min_users) sp.set('min_users', String(params.min_users));
+    if (params?.min_groups) sp.set('min_groups', String(params.min_groups));
+    if (params?.min_unique_users) sp.set('min_unique_users', String(params.min_unique_users));
     const qs = sp.toString();
     return fetchJSON<TelegramDiscoveryResponse>(`/telegram/discovery${qs ? `?${qs}` : ''}`);
   },
@@ -187,6 +197,7 @@ export const telegramApi = {
     sources_done: number; sources_total: number;
     error?: string;
   }>('/telegram/collect/status'),
+  reset: () => fetchJSON<{ status: string; message: string; remaining: Record<string, number> }>('/telegram/reset', { method: 'POST', signal: AbortSignal.timeout(10000) }),
   addSource: (identifier: string, name?: string) => {
     const sp = new URLSearchParams();
     sp.set('telegram_identifier', identifier);
@@ -350,4 +361,32 @@ export const twitterApi = {
   },
   removeSource: (sourceId: string) => fetchJSON<{ status: string }>(`/twitter/sources/${sourceId}`, { method: 'DELETE' }),
   toggleSource: (sourceId: string) => fetchJSON<{ status: string; enabled: boolean }>(`/twitter/sources/${sourceId}/toggle`, { method: 'PUT' }),
+};
+
+// ── GMGN API ─────────────────────────────────────────────────────────
+import type { GMGNDiscoveryResponse, GMGNStats } from './gmgn';
+
+export const gmgnApi = {
+  getDiscovery: (params?: { window?: string; limit?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.window) sp.set('window', params.window);
+    if (params?.limit) sp.set('limit', String(params.limit));
+    return fetchJSON<GMGNDiscoveryResponse>(`/gmgn/discovery${sp.toString() ? `?${sp}` : ''}`);
+  },
+  getStats: () => fetchJSON<GMGNStats>('/gmgn/discovery/stats'),
+  triggerCollect: () => fetchJSON<{ status: string }>('/gmgn/collect', { method: 'POST' }),
+};
+
+// ── DexScreener API ──────────────────────────────────────────────────
+import type { DexScreenerDiscoveryResponse, DexScreenerStats } from './dexscreener';
+
+export const dexscreenerApi = {
+  getDiscovery: (params?: { window?: string; limit?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.window) sp.set('window', params.window);
+    if (params?.limit) sp.set('limit', String(params.limit));
+    return fetchJSON<DexScreenerDiscoveryResponse>(`/dexscreener/discovery${sp.toString() ? `?${sp}` : ''}`);
+  },
+  getStats: () => fetchJSON<DexScreenerStats>('/dexscreener/discovery/stats'),
+  triggerCollect: () => fetchJSON<{ status: string }>('/dexscreener/collect', { method: 'POST' }),
 };

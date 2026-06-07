@@ -2,6 +2,7 @@
 Centralized configuration loaded from environment variables.
 """
 
+from pathlib import Path
 from pydantic_settings import BaseSettings
 from typing import Optional
 
@@ -24,10 +25,7 @@ class Settings(BaseSettings):
 
     # ── External APIs ────────────────────────────────────
     DEXSCREENER_API_URL: str = "https://api.dexscreener.com"
-    # Twikit (free Twitter scraping) — needs a Twitter account
-    TWITTER_USERNAME: Optional[str] = None
-    TWITTER_EMAIL: Optional[str] = None
-    TWITTER_PASSWORD: Optional[str] = None
+    # Twitter/X — scraped via Playwright (public profiles, no auth needed)
     TELEGRAM_API_ID: Optional[int] = None
     TELEGRAM_API_HASH: Optional[str] = None
     TELEGRAM_SESSION_NAME: str = "telegram_discovery"
@@ -49,7 +47,6 @@ class Settings(BaseSettings):
     TELEGRAM_CHAIN_FOCUS: str = "solana,base,ethereum,bsc"
     # Discovery thresholds
     MIN_MENTIONS: int = 5
-    MIN_UNIQUE_USERS: int = 3
     TOP_DISCOVERY_LIMIT: int = 100
     DISCOVERY_WINDOW_MINUTES: int = 60
     # Store raw message text (off by default for privacy)
@@ -65,6 +62,10 @@ class Settings(BaseSettings):
     # ── On-chain data ─────────────────────────────────
     # Free API key from https://gmgn.ai/ai — sol, eth, bsc, base
     GMGN_API_KEY: Optional[str] = None
+
+    # ── AI Evaluation ──────────────────────────────────
+    DEEPSEEK_API_KEY: Optional[str] = None
+    DEEPSEEK_MODEL: str = "deepseek-chat"
 
     # ── Scoring Defaults ─────────────────────────────────
     MIN_LIQUIDITY_NEW: float = 25_000       # Minimum for new launches
@@ -83,7 +84,7 @@ class Settings(BaseSettings):
     WEIGHT_NARRATIVE: float = 0.10
 
     model_config = {
-        "env_file": ".env",
+        "env_file": str(Path(__file__).resolve().parent.parent / ".env"),
         "env_file_encoding": "utf-8",
         "extra": "ignore",  # Ignore extra env vars not in the model
     }

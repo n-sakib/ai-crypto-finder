@@ -53,12 +53,6 @@ def parse_args() -> argparse.Namespace:
         help=f"Minimum mention count to include. Default: {settings.MIN_MENTIONS}",
     )
     parser.add_argument(
-        "--min-users",
-        type=int,
-        default=settings.MIN_UNIQUE_USERS,
-        help=f"Minimum unique users to include. Default: {settings.MIN_UNIQUE_USERS}",
-    )
-    parser.add_argument(
         "--json",
         action="store_true",
         help="Output results as JSON",
@@ -71,12 +65,11 @@ async def main() -> None:
     start_time = time.monotonic()
 
     logger.info("=== Telegram Discovery Ranking ===")
-    logger.info("Window: %s | Limit: %d | Min mentions: %d | Min users: %d",
-                args.window, args.limit, args.min_mentions, args.min_users)
+    logger.info("Window: %s | Limit: %d | Min mentions: %d",
+                args.window, args.limit, args.min_mentions)
 
     aggregator = TelegramDiscoveryAggregator(
         min_mention_count=args.min_mentions,
-        min_unique_users=args.min_users,
     )
 
     async with async_session_factory() as session:

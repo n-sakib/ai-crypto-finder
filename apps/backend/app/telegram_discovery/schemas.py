@@ -57,12 +57,23 @@ class DiscoveryRankingItem(BaseModel):
     mention_count: int
     unique_user_count: int
     group_count: int
+    # Social indicators
+    total_reactions: int = 0
+    total_views: int = 0
+    total_forwards: int = 0
     first_seen_in_window: datetime
     last_seen_in_window: datetime
     discovery_methods: list[DiscoveryMethod]
     source_names: list[str]
+    source_mentions: dict[str, int] = {}  # group_name → mention_count
     dex_url: Optional[str] = None
     pair_address: Optional[str] = None
+    # AI evaluation
+    ai_decision: Optional[str] = None
+    ai_confidence: Optional[float] = None
+    ai_reasoning: Optional[str] = None
+    ai_red_flags: list[str] = []
+    ai_positive_signals: list[str] = []
 
     model_config = {"from_attributes": True}
 

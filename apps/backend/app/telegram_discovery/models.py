@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     Column, String, Integer, Boolean, DateTime, Enum as SAEnum,
-    ForeignKey, Text, Index, UniqueConstraint, BigInteger,
+    ForeignKey, Text, Index, UniqueConstraint, BigInteger, JSON,
 )
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -94,6 +94,11 @@ class TelegramMessage(Base):
     sender_id_hash = Column(String(128), nullable=False)
     text_hash = Column(String(128), nullable=False)
     raw_text = Column(Text, nullable=True)
+    # Social indicators
+    reactions_count = Column(Integer, default=0)
+    views_count = Column(Integer, default=0)
+    forwards_count = Column(Integer, default=0)
+    reply_count = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     # Relationships
@@ -129,6 +134,13 @@ class CandidateToken(Base):
     first_discovery_method = Column(SAEnum(DiscoveryMethod), nullable=False)
     pair_address = Column(String(128), nullable=True)
     dex_url = Column(String(512), nullable=True)
+    # Enrichment data
+    gmgn_data = Column(JSON, default=dict)
+    dexscreener_data = Column(JSON, default=dict)
+    # DeepSeek evaluation
+    ai_evaluation = Column(JSON, default=dict)
+    ai_decision = Column(String(32), nullable=True)  # 'keep', 'discard', 'pending'
+    ai_evaluated_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc),
                          onupdate=lambda: datetime.now(timezone.utc))

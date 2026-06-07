@@ -31,6 +31,13 @@ class TwitterDiscoveryMethod(str, enum.Enum):
     TOKEN_NAME = "TOKEN_NAME"
 
 
+class TwitterMentionDiscoveryMethod(str, enum.Enum):
+    """Separate enum matching the twittermentiondiscoverymethod DB type."""
+    CASHTAG = "CASHTAG"
+    CONTRACT_ADDRESS = "CONTRACT_ADDRESS"
+    TOKEN_NAME = "TOKEN_NAME"
+
+
 class TwitterDiscoveryConfidence(str, enum.Enum):
     VERY_HIGH = "very_high"
     HIGH = "high"
@@ -148,8 +155,8 @@ class TwitterTokenMention(Base):
     tweet_id = Column(UUID(as_uuid=True), ForeignKey("twitter_tweets.id"), nullable=False, index=True)
     tweet_timestamp = Column(DateTime(timezone=True), nullable=False)
     author_name = Column(String(128), nullable=False)
-    discovery_method = Column(SAEnum(TwitterDiscoveryMethod), nullable=False)
-    confidence = Column(SAEnum(TwitterDiscoveryConfidence), nullable=False)
+    discovery_method = Column(String(20), nullable=False)
+    confidence = Column(String(20), nullable=False)
     is_reputable = Column(Boolean, default=False)
     engagement_score = Column(Float, default=0.0)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

@@ -6,6 +6,8 @@ import Pipeline from './pages/Pipeline';
 import TelegramDiscovery from './pages/TelegramDiscovery';
 import RedditDiscovery from './pages/RedditDiscovery';
 import TwitterDiscovery from './pages/TwitterDiscovery';
+import GMGNDiscovery from './pages/GMGNDiscovery';
+import DexScreenerDiscovery from './pages/DexScreenerDiscovery';
 
 export const router = createBrowserRouter([
   {
@@ -18,6 +20,8 @@ export const router = createBrowserRouter([
       { path: 'telegram', element: <TelegramDiscovery /> },
       { path: 'reddit', element: <RedditDiscovery /> },
       { path: 'twitter', element: <TwitterDiscovery /> },
+      { path: 'gmgn', element: <GMGNDiscovery /> },
+      { path: 'dexscreener', element: <DexScreenerDiscovery /> },
     ],
   },
 ]);

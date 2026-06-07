@@ -74,10 +74,12 @@ class TelegramDiscoveryAggregator:
     def __init__(
         self,
         min_mention_count: int | None = None,
-        min_unique_users: int | None = None,
+        min_group_count: int = 1,
+        min_unique_user_count: int = 1,
     ):
         self.min_mention_count = min_mention_count if min_mention_count is not None else settings.MIN_MENTIONS
-        self.min_unique_users = min_unique_users if min_unique_users is not None else settings.MIN_UNIQUE_USERS
+        self.min_group_count = min_group_count
+        self.min_unique_user_count = min_unique_user_count
 
     async def rank(
         self,
@@ -139,9 +141,10 @@ class TelegramDiscoveryAggregator:
         """
         Query mentions in the time window and aggregate by token.
 
-        Uses SQL aggregation for performance.
+        mention_count = total raw mentions (COUNT *)
+        unique_user_count = distinct users (COUNT DISTINCT sender)
+        group_count = distinct groups (COUNT DISTINCT source)
         """
-        # Subquery: count mentions per candidate token in the window
         mention_agg = (
             select(
                 TelegramTokenMention.candidate_token_id,
@@ -161,13 +164,14 @@ class TelegramDiscoveryAggregator:
             .having(
                 and_(
                     func.count(TelegramTokenMention.id) >= self.min_mention_count,
-                    func.count(func.distinct(TelegramTokenMention.sender_id_hash)) >= self.min_unique_users,
+                    func.count(func.distinct(TelegramTokenMention.source_id)) >= self.min_group_count,
+                    func.count(func.distinct(TelegramTokenMention.sender_id_hash)) >= self.min_unique_user_count,
                 )
             )
             .order_by(
+                desc("group_count"),
                 desc("mention_count"),
                 desc("unique_user_count"),
-                desc("group_count"),
                 desc("last_seen"),
             )
             .limit(limit)
@@ -185,9 +189,9 @@ class TelegramDiscoveryAggregator:
             )
             .join(mention_agg, CandidateToken.id == mention_agg.c.candidate_token_id)
             .order_by(
+                desc(mention_agg.c.group_count),
                 desc(mention_agg.c.mention_count),
                 desc(mention_agg.c.unique_user_count),
-                desc(mention_agg.c.group_count),
                 desc(mention_agg.c.last_seen),
             )
         )
@@ -199,9 +203,23 @@ class TelegramDiscoveryAggregator:
         for rank_idx, row in enumerate(rows, start=1):
             token = row[0]
 
+            # Skip unresolved cashtags — they have no real contract address
+            if token.token_address.startswith("cashtag:"):
+                continue
+
             # Get discovery methods used for this token
             methods = await self._get_discovery_methods(session, token.id, window_start, window_end)
             source_names = await self._get_source_names(session, token.id, window_start, window_end)
+            source_mentions = await self._get_source_mentions(session, token.id, window_start, window_end)
+            social_stats = await self._get_social_stats(session, token.id, window_start, window_end)
+
+            # AI evaluation data
+            ai_eval = token.ai_evaluation or {}
+            ai_decision = token.ai_decision
+            ai_confidence = ai_eval.get("confidence") if token.ai_evaluation else None
+            ai_reasoning = ai_eval.get("reasoning")
+            ai_red_flags = ai_eval.get("red_flags", [])
+            ai_positive_signals = ai_eval.get("positive_signals", [])
 
             rankings.append(DiscoveryRankingItem(
                 rank=rank_idx,
@@ -212,12 +230,21 @@ class TelegramDiscoveryAggregator:
                 mention_count=row.mention_count,
                 unique_user_count=row.unique_user_count,
                 group_count=row.group_count,
+                total_reactions=social_stats.get("total_reactions", 0),
+                total_views=social_stats.get("total_replies", 0),
+                total_forwards=social_stats.get("total_forwards", 0),
                 first_seen_in_window=row.first_seen,
                 last_seen_in_window=row.last_seen,
                 discovery_methods=methods,
                 source_names=source_names,
+                source_mentions=source_mentions,
                 dex_url=token.dex_url,
                 pair_address=token.pair_address,
+                ai_decision=ai_decision,
+                ai_confidence=ai_confidence,
+                ai_reasoning=ai_reasoning,
+                ai_red_flags=ai_red_flags or [],
+                ai_positive_signals=ai_positive_signals or [],
             ))
 
         return rankings
@@ -280,6 +307,67 @@ class TelegramDiscoveryAggregator:
             )
         )
         return [row[0] for row in result.all()]
+
+    async def _get_source_mentions(
+        self,
+        session: AsyncSession,
+        candidate_token_id,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> dict[str, int]:
+        """Get per-group mention counts for a token in the window.
+
+        Returns dict of {group_name: mention_count}.
+        Per-group dedup: multiple mentions in same group = 1 mention.
+        """
+        result = await session.execute(
+            select(
+                TelegramSource.name,
+                func.count(func.distinct(TelegramTokenMention.telegram_message_id)).label("cnt"),
+            )
+            .join(TelegramTokenMention, TelegramTokenMention.source_id == TelegramSource.id)
+            .where(
+                and_(
+                    TelegramTokenMention.candidate_token_id == candidate_token_id,
+                    TelegramTokenMention.message_timestamp >= window_start,
+                    TelegramTokenMention.message_timestamp < window_end,
+                )
+            )
+            .group_by(TelegramSource.name)
+            .order_by(desc("cnt"))
+        )
+        return {row[0]: row[1] for row in result.all()}
+
+    async def _get_social_stats(
+        self,
+        session: AsyncSession,
+        candidate_token_id,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> dict[str, int]:
+        """Get aggregated social stats (reactions, replies) for a token's messages.
+
+        Views and forwards are channel-only — not available for group chats.
+        Reactions work for all chat types. Replies work for all chat types.
+        """
+        result = await session.execute(
+            select(
+                func.coalesce(func.sum(TelegramMessage.reactions_count), 0),
+                func.coalesce(func.sum(TelegramMessage.reply_count), 0),
+            )
+            .join(TelegramTokenMention, TelegramTokenMention.telegram_message_id == TelegramMessage.id)
+            .where(
+                and_(
+                    TelegramTokenMention.candidate_token_id == candidate_token_id,
+                    TelegramTokenMention.message_timestamp >= window_start,
+                    TelegramTokenMention.message_timestamp < window_end,
+                )
+            )
+        )
+        row = result.one_or_none()
+        if row:
+            return {"total_reactions": int(row[0]), "total_replies": int(row[1]), "total_forwards": 0}
+        return {"total_reactions": 0, "total_replies": 0, "total_forwards": 0}
 
     async def _persist_rankings(
         self,

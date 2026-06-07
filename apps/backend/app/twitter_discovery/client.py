@@ -1,8 +1,9 @@
 """
-TwitterClientService — Collects tweets via twikit and stores token mentions.
+TwitterClientService — Collects tweets via Playwright scraping of public X profiles
+and persists token mentions.
 
-Uses the existing TwitterDiscovery layer for actual searching,
-then persists results into the twitter_discovery tables.
+The actual Playwright scraping runs via collect_twitter_playwright.py (host machine),
+which feeds results through the /twitter/ingest API endpoint.
 """
 
 import asyncio
@@ -16,7 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.twitter_discovery.models import (
     TwitterSource, TwitterTweet, TwitterCandidateToken,
-    TwitterTokenMention, TwitterDiscoveryMethod, TwitterDiscoveryConfidence,
+    TwitterTokenMention, TwitterDiscoveryMethod, TwitterMentionDiscoveryMethod,
+    TwitterDiscoveryConfidence,
     TwitterSourceType,
 )
 from app.twitter_discovery.config import seed_twitter_sources
@@ -26,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 class TwitterClientService:
-    """Orchestrates Twitter collection: search → extract → store."""
+    """Orchestrates Twitter collection: process ingested candidates → store."""
 
     def __init__(self):
         self._discovery = TwitterDiscovery()
@@ -39,9 +41,8 @@ class TwitterClientService:
         """
         Run a full collection cycle:
         1. Seed default sources if needed
-        2. Run TwitterDiscovery searches via twikit (keyword/cashtag/address queries)
-        3. Fetch tweets from monitored accounts (@handles)
-        4. Extract tokens and store mentions
+        2. Process any pending Playwright-scraped candidates from Redis
+        3. Extract tokens and store mentions
         """
         stats = {
             "tweets_stored": 0,
@@ -54,52 +55,11 @@ class TwitterClientService:
         # Seed default sources
         await seed_twitter_sources(session)
 
-        # Get all enabled sources
-        sources_result = await session.execute(
-            sa_select(TwitterSource).where(TwitterSource.enabled == True)
-        )
-        sources = sources_result.scalars().all()
+        # Discover candidates (from Redis pending queue populated by Playwright)
+        if progress_callback:
+            await progress_callback({"status": "searching", "query": "public profiles"})
 
-        if not sources:
-            stats["errors"].append("No enabled Twitter sources")
-            return stats
-
-        # Split sources: account monitors vs search queries
-        account_sources = [s for s in sources if s.source_type == TwitterSourceType.ACCOUNT_MONITOR]
-        search_sources = [s for s in sources if s.source_type != TwitterSourceType.ACCOUNT_MONITOR]
-
-        discovery = self._discovery
-        candidates: list[dict] = []
-
-        # Phase 1: Account monitoring — fetch tweets from followed accounts
-        if account_sources:
-            total_accounts = len(account_sources)
-            for idx, src in enumerate(account_sources):
-                if progress_callback:
-                    await progress_callback({
-                        "status": "searching",
-                        "sources_total": total_accounts + 30,
-                        "sources_done": idx,
-                        "query": f"@{src.query.replace('@', '')}",
-                    })
-                try:
-                    account_candidates = await self._fetch_account_tweets(session, src, stats)
-                    candidates.extend(account_candidates)
-                except Exception as e:
-                    logger.error("Account fetch failed for %s: %s", src.query, e)
-                    stats["errors"].append(f"@{src.query}: {str(e)}")
-                await asyncio.sleep(2.0)
-
-        # Phase 2: Search-based discovery
-        if search_sources:
-            discovery = self._discovery
-            client = await discovery._get_client()
-
-            if client is not None:
-                await self._run_searches(candidates, discovery, len(account_sources), progress_callback)
-            else:
-                logger.warning("Twikit auth failed — skipping searches")
-                stats["errors"].append("Twitter login failed — check TWITTER_USERNAME/TWITTER_PASSWORD in .env")
+        candidates = await self._discovery.discover()
 
         if progress_callback:
             await progress_callback({
@@ -126,144 +86,33 @@ class TwitterClientService:
 
         return stats
 
-    async def _run_searches(
-        self, candidates: list, discovery, account_offset: int,
-        progress_callback,
-    ):
-        """Run keyword + address searches using twikit."""
-        keyword_count = len(discovery.SEARCH_TERMS)
-        total_terms = account_offset + keyword_count + 3
-
-        async def keyword_progress(data: dict):
-            if progress_callback:
-                d = data.copy()
-                d["sources_done"] = account_offset + d.get("sources_done", 0)
-                d["sources_total"] = total_terms
-                await progress_callback(d)
-
-        async def address_progress(data: dict):
-            if progress_callback:
-                d = data.copy()
-                d["sources_done"] = account_offset + keyword_count + d.get("sources_done", 0)
-                d["sources_total"] = total_terms
-                await progress_callback(d)
-
-        try:
-            kw = await discovery._search_keywords(progress_callback=keyword_progress)
-        except Exception as e:
-            logger.error("Twikit keyword search failed: %s", e)
-            kw = []
-        try:
-            addr = await discovery._search_addresses(progress_callback=address_progress)
-        except Exception as e:
-            logger.error("Twikit address search failed: %s", e)
-            addr = []
-        if isinstance(kw, list): candidates.extend(kw)
-        if isinstance(addr, list): candidates.extend(addr)
-
-    async def _fetch_account_tweets(
+    async def ingest_playwright_candidates(
         self,
         session: AsyncSession,
-        source: TwitterSource,
-        stats: dict,
-        max_tweets: int = 50,
-    ) -> list[dict]:
-        """Fetch recent tweets from a monitored Twitter account via twikit."""
-        client = await self._discovery._get_client()
-        if client is None:
-            return []
+        candidates: list[dict],
+    ) -> dict:
+        """Ingest candidates scraped by the Playwright collector script.
 
-        handle = source.query.lstrip("@")
-        candidates: list[dict] = []
-        tweet_count = 0
+        Called from the /twitter/ingest API endpoint.
+        Stores tweets and mentions directly.
+        """
+        stats = {
+            "tweets_stored": 0,
+            "mentions_stored": 0,
+            "tokens_discovered": 0,
+            "errors": [],
+        }
 
-        try:
-            user = await client.get_user_by_screen_name(handle)
-            if not user:
-                logger.warning("User not found: @%s", handle)
-                return []
+        await seed_twitter_sources(session)
 
-            user_id = str(getattr(user, "id", ""))
-            logger.info("Fetching tweets for @%s (id=%s)...", handle, user_id)
+        for candidate in candidates:
+            try:
+                await self._store_candidate(session, candidate, stats)
+            except Exception as e:
+                stats["errors"].append(f"Store error: {str(e)[:200]}")
 
-            tweets = await client.get_user_tweets(user_id, "Tweets")
-            count = 0
-            async for tweet in tweets:
-                if count >= max_tweets:
-                    break
-                count += 1
-
-                text = getattr(tweet, "text", "") or ""
-                if not text.strip():
-                    continue
-
-                created_at = getattr(tweet, "created_at", None)
-                if created_at:
-                    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
-                    if created_at < cutoff:
-                        continue
-
-                tweet_count += 1
-                engagement = (
-                    (getattr(tweet, "retweet_count", 0) or 0)
-                    + (getattr(tweet, "like_count", 0) or 0)
-                    + (getattr(tweet, "reply_count", 0) or 0)
-                )
-                text_hash = hashlib.sha256(text.encode()).hexdigest()
-                tweet_id_str = str(getattr(tweet, "id", ""))
-                tweet_user = getattr(tweet, "user", None)
-                author_name = getattr(tweet_user, "name", "") if tweet_user else handle
-
-                existing = await session.execute(
-                    sa_select(TwitterTweet).where(
-                        TwitterTweet.source_id == source.id,
-                        TwitterTweet.tweet_id == tweet_id_str,
-                    )
-                )
-                if existing.scalar_one_or_none():
-                    continue
-
-                tw_tweet = TwitterTweet(
-                    source_id=source.id, tweet_id=tweet_id_str,
-                    tweet_timestamp=created_at or datetime.now(timezone.utc),
-                    author_name=author_name, text_hash=text_hash,
-                    tweet_text=text[:500],
-                    retweet_count=getattr(tweet, "retweet_count", 0) or 0,
-                    like_count=getattr(tweet, "like_count", 0) or 0,
-                    reply_count=getattr(tweet, "reply_count", 0) or 0,
-                    tweet_url=f"https://twitter.com/{handle}/status/{tweet_id_str}",
-                )
-                session.add(tw_tweet)
-                await session.flush()
-                stats["tweets_stored"] += 1
-
-                cashtags = TwitterDiscovery.CASHTAG_RE.findall(text)
-                for sym in cashtags:
-                    sym_u = sym.upper()
-                    if sym_u in TwitterDiscovery.SPAM_CASHTAGS or len(sym_u) < 2:
-                        continue
-                    candidates.append({
-                        "symbol": sym_u, "contract_address": "", "chain": "",
-                        "mention_count": 1.0, "unique_accounts": 1,
-                        "total_engagement": engagement, "authority_mentions": 1,
-                        "source": f"@{handle}", "sample_tweets": [text[:200]],
-                    })
-                for addr in TwitterDiscovery.CONTRACT_ADDRESS_EVM_RE.findall(text):
-                    candidates.append({
-                        "symbol": "UNKNOWN", "contract_address": addr,
-                        "chain": "ethereum", "mention_count": 1.0,
-                        "unique_accounts": 1, "total_engagement": engagement,
-                        "authority_mentions": 1,
-                        "source": f"@{handle}", "sample_tweets": [text[:200]],
-                    })
-
-        except Exception as e:
-            logger.error("Error fetching tweets for @%s: %s", handle, e)
-            raise
-
-        source.last_collected_at = datetime.now(timezone.utc)
-        logger.info("@%s: %d tweets fetched, %d tokens found", handle, tweet_count, len(candidates))
-        return candidates
+        await session.commit()
+        return stats
 
     async def _store_candidate(
         self,
@@ -275,7 +124,7 @@ class TwitterClientService:
         symbol = candidate.get("symbol", "UNKNOWN")
         contract_address = candidate.get("contract_address", "")
         chain = candidate.get("chain", "") or "unknown"
-        source_name = candidate.get("source", "twikit")
+        source_name = candidate.get("source", "playwright")
         mention_count = candidate.get("mention_count", 1)
         unique_accounts = candidate.get("unique_accounts", 1)
         engagement = candidate.get("total_engagement", 0)
@@ -288,8 +137,10 @@ class TwitterClientService:
         # Determine discovery method
         if contract_address:
             method = TwitterDiscoveryMethod.CONTRACT_ADDRESS
+            mention_method = TwitterMentionDiscoveryMethod.CONTRACT_ADDRESS
         else:
             method = TwitterDiscoveryMethod.CASHTAG
+            mention_method = TwitterMentionDiscoveryMethod.CASHTAG
 
         # Find or create matching source
         source_result = await session.execute(
@@ -339,7 +190,7 @@ class TwitterClientService:
             source_id=source.id,
             tweet_id=hashlib.sha256(f"{symbol}_{datetime.now(timezone.utc).isoformat()}".encode()).hexdigest()[:32],
             tweet_timestamp=datetime.now(timezone.utc),
-            author_name=f"twikit_{source_name}",
+            author_name=f"playwright_{source_name}",
             text_hash=text_hash,
             tweet_text=combined_text[:500],
             retweet_count=max(0, int(engagement * 0.3)),
@@ -367,8 +218,8 @@ class TwitterClientService:
             tweet_id=tweet.id,
             tweet_timestamp=tweet.tweet_timestamp,
             author_name=tweet.author_name,
-            discovery_method=method,
-            confidence=confidence,
+            discovery_method=mention_method,
+            confidence=confidence.value,
             is_reputable=authority_mentions > 0,
             engagement_score=float(engagement),
         )

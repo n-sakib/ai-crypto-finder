@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { MessageSquare, Hash, Radio, Search, RefreshCw, ExternalLink, TrendingUp, Layers, AlertCircle, Settings, Play, Plus, X, Power } from 'lucide-react';
 import { useTelegramDiscovery, useTelegramSources, useTelegramStats } from '../hooks/useApi';
 import { telegramApi } from '../api/client';
+import GroupMentionsPanel from '../components/GroupMentionsPanel';
 
 const SOURCE_TYPE_LABELS: Record<string, string> = {
   alpha_group: 'Alpha',
@@ -30,7 +31,7 @@ function truncate(s: string, n: number) {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
-function loadSettings(): Partial<{ window: string; limit: number; min_mentions: number; min_users: number }> {
+function loadSettings(): Partial<{ window: string; limit: number; min_mentions: number; min_groups: number; min_unique_users: number }> {
   try {
     const raw = localStorage.getItem('telegram_discovery_settings');
     if (raw) return JSON.parse(raw);
@@ -43,11 +44,12 @@ function saveSettings(s: Record<string, unknown>) {
 }
 
 export default function TelegramDiscovery() {
-  const [settings, setSettings] = useState<{ window: string; limit: number; min_mentions: number; min_users: number }>(() => ({
+  const [settings, setSettings] = useState<{ window: string; limit: number; min_mentions: number; min_groups: number; min_unique_users: number }>(() => ({
     window: '24h',
     limit: 50,
     min_mentions: 1,
-    min_users: 1,
+    min_groups: 1,
+    min_unique_users: 1,
     ...loadSettings(),
   }));
   const [showSettings, setShowSettings] = useState(false);
@@ -60,7 +62,8 @@ export default function TelegramDiscovery() {
     window: settings.window,
     limit: settings.limit,
     min_mentions: settings.min_mentions,
-    min_users: settings.min_users,
+    min_groups: settings.min_groups,
+    min_unique_users: settings.min_unique_users,
   });
   const { data: sources, isLoading: srcLoading, refetch: refetchSources } = useTelegramSources();
   const { data: stats, refetch: refetchStats } = useTelegramStats();
@@ -104,10 +107,30 @@ export default function TelegramDiscovery() {
       console.error('Failed to toggle source', e);
     }
   };
+
+  const [resetting, setResetting] = useState(false);
+  const handleReset = async () => {
+    if (collecting || resetting) return;
+    setResetting(true);
+    try {
+      await telegramApi.reset();
+    } catch (e) {
+      console.error('Reset failed', e);
+    } finally {
+      setResetting(false);
+      refetchDiscovery();
+      refetchSources();
+      refetchStats();
+    }
+  };
+
   const [progress, setProgress] = useState<{
-    status: string; group: string; total_messages: number;
+    step?: string; status?: string; group?: string; total_messages: number;
     total_tokens: number; total_mentions?: number;
     sources_done: number; sources_total: number;
+    enriched?: number; failed?: number;
+    ai_kept?: number; ai_discarded?: number; ai_pending?: number;
+    progress_pct?: number;
   } | null>(null);
   const [collectError, setCollectError] = useState<string | null>(null);
 
@@ -115,8 +138,8 @@ export default function TelegramDiscovery() {
     setCollecting(true);
     setCollectError(null);
     setProgress({
-      status: 'starting', group: '', total_messages: 0, total_tokens: 0,
-      sources_done: 0, sources_total: sources?.filter(s => s.enabled).length || 19,
+      step: 'reset', status: 'Starting...', total_messages: 0, total_tokens: 0,
+      sources_done: 0, sources_total: sources?.filter(s => s.enabled).length || 60,
     });
 
     try {
@@ -149,6 +172,11 @@ export default function TelegramDiscovery() {
               const data = JSON.parse(currentData);
               if (currentEvent === 'progress' || currentEvent === 'done') {
                 setProgress(data);
+                // Refetch when enrichment/dedup/ai steps complete to show updated data
+                if (data.refetch) {
+                  refetchDiscovery();
+                  refetchStats();
+                }
               }
               if (currentEvent === 'done') {
                 setCollecting(false);
@@ -214,21 +242,38 @@ export default function TelegramDiscovery() {
             {stats?.enabled_sources ?? 0} groups · {stats?.candidate_tokens ?? 0} tokens · {stats?.total_mentions ?? 0} mentions
           </p>
         </div>
-        <button
-          onClick={handleCollect}
-          disabled={collecting}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
-            collecting
-              ? 'bg-indigo-500/20 text-indigo-300 cursor-wait'
-              : 'bg-indigo-500 text-white hover:bg-indigo-600 active:scale-95'
-          }`}
-        >
-          {collecting ? (
-            <><RefreshCw size={14} className="animate-spin" /> Collecting…</>
-          ) : (
-            <><Play size={14} /> Run Discovery</>
-          )}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleReset}
+            disabled={collecting || resetting}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+              resetting
+                ? 'bg-red-500/20 text-red-300 cursor-wait'
+                : 'bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 active:scale-95'
+            }`}
+          >
+            {resetting ? (
+              <><RefreshCw size={14} className="animate-spin" /> Resetting…</>
+            ) : (
+              <><X size={14} /> Reset All</>
+            )}
+          </button>
+          <button
+            onClick={handleCollect}
+            disabled={collecting || resetting}
+            className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+              collecting
+                ? 'bg-indigo-500/20 text-indigo-300 cursor-wait'
+                : 'bg-indigo-500 text-white hover:bg-indigo-600 active:scale-95'
+            }`}
+          >
+            {collecting ? (
+              <><RefreshCw size={14} className="animate-spin" /> Collecting…</>
+            ) : (
+              <><Play size={14} /> Run Discovery</>
+            )}
+          </button>
+        </div>
       </div>
 
       {/* ── Stats Row ──────────────────────────────────────────────── */}
@@ -236,11 +281,12 @@ export default function TelegramDiscovery() {
         <StatCard
           icon={Radio} label="Groups" value={enabledSources.length}
           color="text-indigo-400" bg="bg-indigo-500/10" loading={collecting}
-          sub={collecting && progress ? `${progress.sources_done}/${progress.sources_total}` : (lastDiscoveryLabel ? `Last: ${lastDiscoveryLabel}` : undefined)}
+          sub={collecting && progress?.sources_total ? `${progress.sources_done}/${progress.sources_total}` : (lastDiscoveryLabel ? `Last: ${lastDiscoveryLabel}` : undefined)}
         />
         <StatCard
           icon={Search} label="Tokens" value={collecting && progress ? progress.total_tokens : (stats?.candidate_tokens ?? 0)}
           color="text-green-400" bg="bg-green-500/10" loading={collecting || discLoading}
+          sub={collecting && progress?.enriched != null ? `✓${progress.enriched} enriched` : undefined}
         />
         <StatCard
           icon={MessageSquare} label="Mentions" value={collecting && progress && progress.total_mentions != null ? progress.total_mentions : (stats?.total_mentions ?? 0)}
@@ -249,40 +295,43 @@ export default function TelegramDiscovery() {
         <StatCard
           icon={Hash} label="Messages" value={collecting && progress ? progress.total_messages : (stats?.messages_stored ?? 0)}
           color="text-cyan-400" bg="bg-cyan-500/10" loading={collecting || discLoading}
+          sub={collecting && progress?.ai_kept != null ? `AI: ${progress.ai_kept}✓ ${progress.ai_discarded}✗` : undefined}
         />
       </div>
 
       {/* ── Progress Bar ──────────────────────────────────────────── */}
-      {collecting && progress && progress.sources_total > 0 && (
+      {collecting && progress && (
         <div className="mb-4">
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-xs text-[#a1a1aa]">
-              {progress.status === 'resetting' ? 'Resetting data…' :
-               progress.status === 'collecting' ? `Scanning groups (${progress.sources_done}/${progress.sources_total})` :
-               progress.status === 'extracting' ? `Extracting tokens ${progress.group}` :
-               progress.status === 'enriching' ? progress.group :
-               'Collecting…'}
+              {progress.step === 'reset' ? 'Clearing previous data…' :
+               progress.step === 'collect' ? `Scanning groups (${progress.sources_done}/${progress.sources_total})` :
+               progress.step === 'extract' ? `Extracting tokens — ${progress.status || ''}` :
+               progress.step === 'enrich' ? `Enriching tokens — ${progress.status || ''}` :
+               progress.step === 'dedup' ? 'Removing duplicates…' :
+               progress.step === 'ai' ? `AI Evaluation — ${progress.status || ''}` :
+               progress.step === 'done' ? 'Complete!' :
+               progress.status || 'Working…'}
             </span>
-            <span className="text-xs text-indigo-400 font-mono">
-              {Math.round((progress.sources_done / progress.sources_total) * 100)}%
-            </span>
+            {(progress.progress_pct != null || progress.sources_total > 0) && (
+              <span className="text-xs text-indigo-400 font-mono">
+                {progress.progress_pct != null ? `${progress.progress_pct}%` :
+                  `${Math.round((progress.sources_done / progress.sources_total) * 100)}%`}
+              </span>
+            )}
           </div>
           <div className="w-full bg-[#1a1a24] rounded-full h-2 border border-[#1e1e2e]">
             <div
-              className="bg-indigo-500 h-full rounded-full transition-all duration-500 ease-out"
-              style={{ width: `${(progress.sources_done / progress.sources_total) * 100}%` }}
+              className={`h-full rounded-full transition-all duration-500 ease-out ${
+                progress.step === 'enrich' ? 'bg-emerald-500' :
+                progress.step === 'ai' ? 'bg-purple-500' :
+                progress.step === 'dedup' ? 'bg-amber-500' :
+                'bg-indigo-500'
+              }`}
+              style={{ width: `${progress.progress_pct != null ? progress.progress_pct :
+                progress.sources_total > 0 ? (progress.sources_done / progress.sources_total) * 100 : 0}%` }}
             />
           </div>
-          {progress.status === 'extracting' && (
-            <div className="mt-1.5">
-              <div className="w-full bg-[#1a1a24] rounded-full h-1.5 border border-[#1e1e2e]">
-                <div
-                  className="bg-emerald-500 h-full rounded-full transition-all duration-300 ease-out"
-                  style={{ width: `${progress.group ? (parseInt(progress.group.match(/\d+/)?.[0] || '0') / parseInt(progress.group.match(/\d+$/)?.[0] || '1')) * 100 : 0}%` }}
-                />
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -310,13 +359,14 @@ export default function TelegramDiscovery() {
           className="flex items-center gap-1.5 text-xs text-[#71717a] hover:text-[#a1a1aa] transition-colors"
         >
           <Settings size={12} />
-          {showSettings ? 'Hide' : 'Filters'}: window={settings.window} · min mentions={settings.min_mentions} · min users={settings.min_users} · limit={settings.limit}
+          {showSettings ? 'Hide' : 'Filters'}: window={settings.window} · mentions≥{settings.min_mentions} · groups≥{settings.min_groups} · users≥{settings.min_unique_users} · limit={settings.limit}
         </button>
         {showSettings && (
           <div className="mt-2 p-3 rounded-lg bg-[#13131a] border border-[#1e1e2e] flex flex-wrap gap-3 items-end">
             <SettingsField label="Window" value={settings.window} onChange={v => setSettings((s: typeof settings) => ({ ...s, window: v }))} options={['15m', '30m', '60m', '6h', '24h']} />
             <SettingsField label="Min Mentions" value={String(settings.min_mentions)} onChange={v => setSettings((s: typeof settings) => ({ ...s, min_mentions: Number(v) }))} options={['1', '2', '3', '5', '10', '20']} />
-            <SettingsField label="Min Users" value={String(settings.min_users)} onChange={v => setSettings((s: typeof settings) => ({ ...s, min_users: Number(v) }))} options={['1', '2', '3', '5', '10']} />
+            <SettingsField label="Min Groups" value={String(settings.min_groups)} onChange={v => setSettings((s: typeof settings) => ({ ...s, min_groups: Number(v) }))} options={['1', '2', '3', '5', '10']} />
+            <SettingsField label="Min Users" value={String(settings.min_unique_users)} onChange={v => setSettings((s: typeof settings) => ({ ...s, min_unique_users: Number(v) }))} options={['1', '2', '3', '5', '10']} />
             <SettingsField label="Limit" value={String(settings.limit)} onChange={v => setSettings((s: typeof settings) => ({ ...s, limit: Number(v) }))} options={['10', '25', '50', '100', '200']} />
           </div>
         )}
@@ -505,12 +555,27 @@ export default function TelegramDiscovery() {
                           <td className="py-2.5 px-2 hidden sm:table-cell capitalize text-[#a1a1aa] text-xs">{token.chain}</td>
                           <td className="py-2.5 px-2 text-right">
                             <span className="font-mono text-[#e4e4e7] font-medium">{token.mention_count}</span>
+                            {(token.total_reactions > 0 || token.total_views > 0) && (
+                              <div className="flex items-center justify-end gap-1.5 mt-0.5">
+                                {token.total_reactions > 0 && (
+                                  <span className="text-[10px] text-emerald-400" title="Reactions">👍{token.total_reactions}</span>
+                                )}
+                                {token.total_views > 0 && (
+                                  <span className="text-[10px] text-blue-400" title="Replies">💬{token.total_views}</span>
+                                )}
+                              </div>
+                            )}
                           </td>
                           <td className="py-2.5 px-2 text-right hidden md:table-cell">
                             <span className="font-mono text-[#71717a]">{token.unique_user_count}</span>
                           </td>
                           <td className="py-2.5 px-2 text-right hidden md:table-cell">
-                            <span className="font-mono text-[#71717a]">{token.group_count}</span>
+                            <span className={`font-mono font-medium ${
+                              token.group_count >= 5 ? 'text-green-400' :
+                              token.group_count >= 3 ? 'text-emerald-400' :
+                              token.group_count >= 2 ? 'text-amber-400' :
+                              'text-[#71717a]'
+                            }`}>{token.group_count}</span>
                           </td>
                           <td className="py-2.5 px-2 hidden lg:table-cell">
                             <div className="flex flex-wrap gap-1">
@@ -554,6 +619,56 @@ export default function TelegramDiscovery() {
                                     {new Date(token.last_seen_in_window).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                                   </div>
                                 </div>
+                                <div>
+                                  <span className="text-[#52525b]">Reactions</span>
+                                  <div className="text-[#10b981] mt-0.5 font-mono">{token.total_reactions ?? 0}</div>
+                                </div>
+                                <div>
+                                  <span className="text-[#52525b]">Replies</span>
+                                  <div className="text-[#60a5fa] mt-0.5 font-mono">{token.total_views ?? 0}</div>
+                                </div>
+                                {token.ai_decision && (
+                                  <div className="col-span-2 sm:col-span-4">
+                                    <span className="text-[#52525b]">AI Decision</span>
+                                    <div className="flex items-center gap-1.5 mt-0.5">
+                                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                        token.ai_decision === 'keep' ? 'bg-green-500/10 text-green-400' :
+                                        token.ai_decision === 'discard' ? 'bg-red-500/10 text-red-400' :
+                                        'bg-yellow-500/10 text-yellow-400'
+                                      }`}>
+                                        {token.ai_decision.toUpperCase()}
+                                      </span>
+                                      {token.ai_confidence != null && (
+                                        <span className="text-[10px] text-[#52525b]">
+                                          {Math.round(token.ai_confidence * 100)}% confidence
+                                        </span>
+                                      )}
+                                    </div>
+                                    {token.ai_reasoning && (
+                                      <div className="mt-1.5 p-2 rounded bg-[#13131a] border border-[#1e1e2e]">
+                                        <p className="text-xs text-[#a1a1aa] leading-relaxed">{token.ai_reasoning}</p>
+                                      </div>
+                                    )}
+                                    {token.ai_red_flags?.length > 0 && (
+                                      <div className="flex flex-wrap gap-1 mt-1.5">
+                                        {token.ai_red_flags.map((flag: string) => (
+                                          <span key={flag} className="px-1.5 py-0.5 rounded bg-red-500/10 text-red-400 text-[10px]">
+                                            🚩 {flag}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    )}
+                                    {token.ai_positive_signals?.length > 0 && (
+                                      <div className="flex flex-wrap gap-1 mt-1">
+                                        {token.ai_positive_signals.map((sig: string) => (
+                                          <span key={sig} className="px-1.5 py-0.5 rounded bg-green-500/10 text-green-400 text-[10px]">
+                                            ✅ {sig}
+                                          </span>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
                                 {token.dex_url && (
                                   <div className="col-span-2">
                                     <span className="text-[#52525b]">DEX Link</span>
@@ -569,6 +684,15 @@ export default function TelegramDiscovery() {
                                   </div>
                                 )}
                               </div>
+                              {/* ── Group Mentions Breakdown ───────────────── */}
+                              {token.source_mentions && Object.keys(token.source_mentions).length > 0 && (
+                                <div className="mt-3 pt-3 border-t border-[#1e1e2e]">
+                                  <GroupMentionsPanel
+                                    sourceMentions={token.source_mentions}
+                                    totalMentions={token.mention_count}
+                                  />
+                                </div>
+                              )}
                             </td>
                           </tr>
                         )}

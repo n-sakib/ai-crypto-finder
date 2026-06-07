@@ -47,24 +47,26 @@ async def get_telegram_discovery(
         ge=1, le=500, description="Max tokens to return"
     ),
     min_mentions: int = Query(
-        default_factory=lambda: settings.MIN_MENTIONS,
-        ge=1, description="Minimum mention count"
+        default=1, ge=1, description="Minimum mention count"
     ),
-    min_users: int = Query(
-        default_factory=lambda: settings.MIN_UNIQUE_USERS,
-        ge=1, description="Minimum unique users"
+    min_groups: int = Query(
+        default=1, ge=1, le=100, description="Minimum distinct groups"
+    ),
+    min_unique_users: int = Query(
+        default=1, ge=1, le=1000, description="Minimum distinct users"
     ),
     session: AsyncSession = Depends(get_session),
 ):
     """
     Get top discovered tokens from Telegram for a time window.
 
-    Tokens are ranked by mention_count DESC, then unique_user_count DESC,
-    then group_count DESC, then most recent mention DESC.
+    Tokens are ranked by group_count DESC, then mention_count DESC,
+    then unique_user_count DESC, then most recent mention DESC.
     """
     aggregator = TelegramDiscoveryAggregator(
         min_mention_count=min_mentions,
-        min_unique_users=min_users,
+        min_group_count=min_groups,
+        min_unique_user_count=min_unique_users,
     )
     return await aggregator.rank(session, window=window, limit=limit)
 
@@ -203,9 +205,16 @@ async def trigger_collect(
     window: str = Query("24h", description="Time window for collection: 30m, 60m, 6h, 24h"),
 ):
     """
-    Run Telegram discovery collection as a foreground SSE stream.
-    Sends real-time progress events: group, messages, tokens, mentions.
-    Only one collection runs at a time.
+    Run Telegram discovery collection as SSE stream.
+
+    Pipeline steps:
+    1. Collect messages from all enabled sources with social indicators
+    2. Extract token references (CAs, Cashtags, DEX links)
+    3. Store ALL messages with metadata (group, reactions, views, forwards)
+    4. Per-group dedup: same coin in same group = 1 mention
+    5. Enrich tokens with Dexscreener + GMGN data
+    6. Remove duplicate tokens (merge cashtag→CA resolutions)
+    7. DeepSeek AI evaluation: keep/discard each token
     """
     if _COLLECT_LOCK.locked():
         return {"status": "busy", "message": "Collection already in progress"}
@@ -217,14 +226,13 @@ async def trigger_collect(
         from app.telegram_discovery.aggregator import parse_window
         logger = logging.getLogger("telegram.collect.sse")
 
-        # Parse window to calculate offset_date for Telegram collection
         window_delta = parse_window(window)
         offset_date = dt.now(tz.utc) - window_delta
 
         event_queue: aio.Queue = aio.Queue()
 
         def fmt(event: str, data: dict) -> str:
-            return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+            return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
         async with _COLLECT_LOCK:
             try:
@@ -233,10 +241,11 @@ async def trigger_collect(
                 from app.telegram_discovery.config import load_telegram_sources_async
                 from app.telegram_discovery.extractor import TokenExtractor
                 from app.telegram_discovery.resolver import TokenResolver
+                from app.telegram_discovery.enricher import TokenEnricher
+                from app.telegram_discovery.evaluator import DeepSeekEvaluator
                 from app.telegram_discovery.models import (
                     TelegramSource, TelegramMessage, TelegramTokenMention,
-                    CandidateToken, TelegramDiscoveryRanking,
-                    DiscoveryMethod,
+                    CandidateToken, TelegramDiscoveryRanking, DiscoveryMethod,
                 )
                 from sqlalchemy import delete, update, func, or_ as sa_or
                 from sqlalchemy import select as sa_select
@@ -246,34 +255,30 @@ async def trigger_collect(
                 if not enabled:
                     await event_queue.put(fmt("error", {"message": "No enabled sources"}))
                     await event_queue.put(None)
-                    # drain
-                    while not event_queue.empty():
-                        try:
-                            msg = await aio.wait_for(event_queue.get(), timeout=0.1)
-                            if msg:
-                                yield msg
-                        except aio.TimeoutError:
-                            break
                     return
 
                 await event_queue.put(fmt("progress", {
-                    "status": "resetting", "group": "", "total_messages": 0,
-                    "total_tokens": 0, "total_mentions": 0,
-                    "sources_done": 0, "sources_total": len(enabled),
+                    "step": "reset", "status": "Clearing previous data...",
+                    "progress_pct": 0,
                 }))
 
-                async def run_collection():
-                    """Background task: runs collection, pushes events to queue."""
+                async def run_pipeline():
                     client_service = TelegramClientService()
                     extractor = TokenExtractor()
                     resolver = TokenResolver()
+                    enricher = TokenEnricher()
+                    evaluator = DeepSeekEvaluator()
+
                     try:
                         async with async_session_factory() as session:
+                            # ── Step 0: Reset ──────────────────────────────
                             await session.execute(delete(TelegramTokenMention))
                             await session.execute(delete(TelegramDiscoveryRanking))
                             await session.execute(delete(CandidateToken))
                             await session.execute(delete(TelegramMessage))
-                            await session.execute(update(TelegramSource).values(last_message_id=0, last_collected_at=None))
+                            await session.execute(update(TelegramSource).values(
+                                last_message_id=0, last_collected_at=None
+                            ))
                             await session.commit()
 
                             sources = await client_service.sync_sources(session, enabled)
@@ -281,59 +286,71 @@ async def trigger_collect(
                                 await event_queue.put(fmt("error", {"message": "No sources synced"}))
                                 return
 
+                            # ── Step 1: Collect Messages ───────────────────
+                            await event_queue.put(fmt("progress", {
+                                "step": "collect", "status": f"Scanning {len(sources)} groups...",
+                                "progress_pct": 5,
+                            }))
+
                             total_messages = 0
                             sources_done = 0
 
-                            async def on_source(source, source_stats):
+                            async def on_progress(source, source_stats):
                                 nonlocal total_messages, sources_done
                                 total_messages += source_stats["processed"]
                                 sources_done += 1
-                                token_count = (await session.execute(sa_select(func.count(CandidateToken.id)))).scalar() or 0
-                                mention_count = (await session.execute(sa_select(func.count(TelegramTokenMention.id)))).scalar() or 0
                                 await event_queue.put(fmt("progress", {
-                                    "status": "collecting",
+                                    "step": "collect",
+                                    "status": f"Group: {source.name} ({source_stats['processed']} msgs)",
                                     "group": source.name or source.telegram_identifier,
-                                    "group_id": source.source_id,
                                     "total_messages": total_messages,
-                                    "total_tokens": token_count,
-                                    "total_mentions": mention_count,
                                     "sources_done": sources_done,
                                     "sources_total": len(sources),
+                                    "progress_pct": 5 + int(20 * sources_done / len(sources)),
                                 }))
 
                             stats, collected = await client_service.collect_messages(
-                                session, sources, progress_callback=on_source,
+                                session, sources,
+                                progress_callback=on_progress,
                                 offset_date=offset_date,
                             )
-                            # Commit messages immediately so they persist
                             await session.commit()
 
-                            # Extract + resolve tokens with progress
-                            # Contract addresses + DEX links: full resolution
-                            # Cashtags: store directly without DEX Screener lookups (too slow)
+                            await event_queue.put(fmt("progress", {
+                                "step": "collect",
+                                "status": f"Collected {total_messages} messages with social indicators",
+                                "total_messages": total_messages,
+                                "progress_pct": 25,
+                            }))
+
+                            # ── Step 2: Extract & Store Token Refs ─────────
+                            await event_queue.put(fmt("progress", {
+                                "step": "extract",
+                                "status": f"Extracting tokens from {len(collected)} messages...",
+                                "progress_pct": 28,
+                            }))
+
                             total_items = len(collected)
-                            extracted = 0
-                            for db_msg, src, text in collected:
+                            for i, (db_msg, src, text) in enumerate(collected):
                                 refs = extractor.extract(text)
                                 if refs:
-                                    # Separate fast refs (addresses/links) from slow (cashtags)
                                     fast_refs = [r for r in refs if r.discovery_method.value in ('CONTRACT_ADDRESS', 'DEX_LINK')]
                                     cashtag_refs = [r for r in refs if r.discovery_method.value == 'CASHTAG']
+
                                     if fast_refs:
                                         await resolver.resolve_and_store_mentions(session, src, db_msg, fast_refs)
-                                    # Store cashtags directly (no DEX lookup) + create mention
+
                                     for ref in cashtag_refs:
                                         candidate = await resolver._upsert_candidate(
                                             session=session,
                                             chain=ref.chain or 'ethereum',
-                                            token_address=ref.token_address or f'cashtag:{ref.symbol or "unknown"}',
+                                            token_address=ref.token_address or f"cashtag:{ref.symbol or 'unknown'}",
                                             symbol=ref.symbol or 'UNKNOWN',
                                             name=ref.symbol,
                                             source=src,
                                             discovery_method=ref.discovery_method,
-                                            pair_address=None,
-                                            dex_url=None,
-                                            now=datetime.now(timezone.utc),
+                                            pair_address=None, dex_url=None,
+                                            now=dt.now(tz.utc),
                                         )
                                         if candidate:
                                             await resolver._store_mention(
@@ -343,166 +360,229 @@ async def trigger_collect(
                                                 message=db_msg,
                                                 ref=ref,
                                             )
-                                extracted += 1
-                                if extracted % 10 == 0 or extracted == total_items:
+
+                                if (i + 1) % 20 == 0:
                                     await session.commit()
-                                    token_count = (await session.execute(sa_select(func.count(CandidateToken.id)))).scalar() or 0
-                                    mention_count = (await session.execute(sa_select(func.count(TelegramTokenMention.id)))).scalar() or 0
                                     await event_queue.put(fmt("progress", {
-                                        "status": "extracting",
-                                        "group": f"Processing {extracted}/{total_items}",
-                                        "total_messages": total_messages,
-                                        "total_tokens": token_count,
-                                        "total_mentions": mention_count,
-                                        "sources_done": sources_done,
-                                        "sources_total": len(sources),
+                                        "step": "extract",
+                                        "status": f"Extracting {i + 1}/{total_items}",
+                                        "progress_pct": 28 + int(12 * (i + 1) / total_items),
                                     }))
 
-                            # ── Enrich tokens from THIS window only ──
-                            # Only enrich tokens that have mentions WITHIN the selected window.
-                            # This ensures 15m window only enriches tokens mentioned in last 15 min.
-                            contract_tokens = (await session.execute(
+                            await session.commit()
+                            token_count = (await session.execute(sa_select(func.count(CandidateToken.id)))).scalar() or 0
+                            mention_count = (await session.execute(sa_select(func.count(TelegramTokenMention.id)))).scalar() or 0
+
+                            await event_queue.put(fmt("progress", {
+                                "step": "extract",
+                                "status": f"Found {token_count} unique tokens, {mention_count} mentions",
+                                "total_tokens": token_count,
+                                "total_mentions": mention_count,
+                                "progress_pct": 40,
+                            }))
+
+                            # ── Step 3: Enrich with Dexscreener + GMGN ─────
+                            await event_queue.put(fmt("progress", {
+                                "step": "enrich", "status": "Enriching tokens with Dexscreener + GMGN...",
+                                "progress_pct": 42,
+                            }))
+
+                            tokens_to_enrich = (await session.execute(
                                 sa_select(CandidateToken).where(
-                                    sa_or(
-                                        CandidateToken.first_discovery_method.in_([DiscoveryMethod.CONTRACT_ADDRESS, DiscoveryMethod.DEX_LINK]),
-                                        CandidateToken.token_address.startswith("cashtag:"),
-                                    ),
                                     CandidateToken.id.in_(
                                         sa_select(TelegramTokenMention.candidate_token_id)
                                         .where(TelegramTokenMention.message_timestamp >= offset_date)
                                         .distinct()
-                                    ),
+                                    )
                                 )
                             )).scalars().all()
-                            enriched = 0
-                            total_contract = len(contract_tokens)
-                            if contract_tokens:
+
+                            async def on_enrich_progress(done, total, enriched, failed):
+                                token_count = (await session.execute(sa_select(func.count(CandidateToken.id)))).scalar() or 0
+                                mention_count = (await session.execute(sa_select(func.count(TelegramTokenMention.id)))).scalar() or 0
+                                msg_count = (await session.execute(sa_select(func.count(TelegramMessage.id)))).scalar() or 0
                                 await event_queue.put(fmt("progress", {
-                                    "status": "enriching",
-                                    "group": f"0/{total_contract}",
-                                    "total_messages": total_messages,
-                                    "total_tokens": 0,
-                                    "total_mentions": 0,
-                                    "sources_done": 0,
-                                    "sources_total": total_contract,
+                                    "step": "enrich",
+                                    "status": f"Enriching {done}/{total} (✓{enriched} ✗{failed})",
+                                    "enriched": enriched, "failed": failed,
+                                    "total_tokens": token_count,
+                                    "total_mentions": mention_count,
+                                    "total_messages": msg_count,
+                                    "progress_pct": 42 + int(18 * done / max(total, 1)),
                                 }))
-                                import httpx
-                                from app.config import settings as app_settings
-                                from sqlalchemy.exc import IntegrityError
-                                async with httpx.AsyncClient(timeout=10) as http:
-                                    for i, token in enumerate(contract_tokens):
-                                        try:
-                                            if token.first_discovery_method == DiscoveryMethod.CASHTAG:
-                                                resp = await http.get(
-                                                    f"{app_settings.DEXSCREENER_API_URL}/latest/dex/search?q={token.symbol}"
-                                                )
-                                            else:
-                                                resp = await http.get(
-                                                    f"{app_settings.DEXSCREENER_API_URL}/latest/dex/tokens/{token.token_address}"
-                                                )
-                                            if resp.status_code == 200:
-                                                data = resp.json()
-                                                pairs = data.get("pairs")
-                                                if pairs and len(pairs) > 0:
-                                                    base = pairs[0].get("baseToken", {})
-                                                    if base.get("symbol") and base.get("address"):
-                                                        new_addr = base["address"]
-                                                        new_chain = pairs[0].get("chainId", token.chain)
-                                                        # Check if another token already has this address
-                                                        existing = (await session.execute(
-                                                            sa_select(CandidateToken.id).where(
-                                                                CandidateToken.chain == new_chain,
-                                                                CandidateToken.token_address == new_addr,
-                                                            )
-                                                        )).scalar_one_or_none()
-                                                        if not existing or existing == token.id:
-                                                            token.symbol = base["symbol"]
-                                                            token.name = base.get("name") or base["symbol"]
-                                                            token.token_address = new_addr
-                                                            token.chain = new_chain
-                                                            enriched += 1
-                                                            # Use savepoint to isolate failures
-                                                            try:
-                                                                await session.flush()
-                                                            except IntegrityError:
-                                                                await session.rollback()
-                                                                await session.refresh(token)
-                                                                enriched -= 1
-                                                            except Exception:
-                                                                await session.rollback()
-                                                                await session.refresh(token)
-                                                                enriched -= 1
-                                                        elif token.token_address.startswith("cashtag:"):
-                                                            # Cashtag placeholder resolves to existing token → merge
-                                                            await session.execute(
-                                                                update(TelegramTokenMention)
-                                                                .where(TelegramTokenMention.candidate_token_id == token.id)
-                                                                .values(candidate_token_id=existing)
-                                                            )
-                                                            await session.delete(token)
-                                                            enriched += 1
-                                                            try:
-                                                                await session.flush()
-                                                            except Exception:
-                                                                await session.rollback()
-                                                                await session.refresh(token)
-                                                                enriched -= 1
-                                            await aio.sleep(0.35)
-                                        except Exception as e:
-                                            logger.warning(f"Enrichment failed for {token.symbol}: {e}")
-                                        if (i + 1) % 5 == 0 or i == total_contract - 1:
-                                            await event_queue.put(fmt("progress", {
-                                                "status": "enriching",
-                                                "group": f"{i + 1}/{total_contract}",
-                                                "total_messages": total_messages,
-                                                "total_tokens": enriched,
-                                                "total_mentions": 0,
-                                                "sources_done": i + 1,
-                                                "sources_total": total_contract,
-                                            }))
-                            if enriched:
-                                await session.commit()
-                                await event_queue.put(fmt("progress", {
-                                    "status": "enriching",
-                                    "group": f"Enriched {enriched} tokens with DEX symbols",
-                                    "total_messages": total_messages,
-                                    "total_tokens": enriched,
-                                    "total_mentions": 0,
-                                    "sources_done": sources_done,
-                                    "sources_total": len(sources),
-                                }))
+
+                            enriched_count, _ = await enricher.enrich_tokens_batch(
+                                session, tokens_to_enrich,
+                                progress_callback=on_enrich_progress,
+                            )
                             await session.commit()
 
-                            final_messages = (await session.execute(sa_select(func.count(TelegramMessage.id)))).scalar() or 0
-                            final_tokens = (await session.execute(sa_select(func.count(CandidateToken.id)))).scalar() or 0
-                            final_mentions = (await session.execute(sa_select(func.count(TelegramTokenMention.id)))).scalar() or 0
+                            # Signal frontend to refetch with updated enriched data
+                            token_count = (await session.execute(sa_select(func.count(CandidateToken.id)))).scalar() or 0
+                            mention_count = (await session.execute(sa_select(func.count(TelegramTokenMention.id)))).scalar() or 0
+                            msg_count = (await session.execute(sa_select(func.count(TelegramMessage.id)))).scalar() or 0
+                            await event_queue.put(fmt("progress", {
+                                "step": "enrich",
+                                "status": f"Enriched {enriched_count} tokens",
+                                "total_tokens": token_count,
+                                "total_mentions": mention_count,
+                                "total_messages": msg_count,
+                                "refetch": True,
+                                "progress_pct": 60,
+                            }))
+
+                            # ── Step 4: Remove Duplicates ──────────────────
+                            await event_queue.put(fmt("progress", {
+                                "step": "dedup", "status": "Removing duplicate tokens...",
+                                "progress_pct": 62,
+                            }))
+
+                            # Merge tokens that were resolved from cashtags to real addresses
+                            dup_fixed = 0
+                            with session.no_autoflush:
+                                all_tokens = (await session.execute(
+                                    sa_select(CandidateToken).order_by(CandidateToken.token_address)
+                                )).scalars().all()
+
+                                seen: dict = {}
+                                for token in all_tokens:
+                                    key = f"{token.chain}:{token.token_address}"
+                                    if token.token_address.startswith("cashtag:"):
+                                        continue  # Keep unresolved cashtags
+                                    if key in seen:
+                                        # Duplicate → merge mentions to first token
+                                        existing = seen[key]
+                                        await session.execute(
+                                            update(TelegramTokenMention)
+                                            .where(TelegramTokenMention.candidate_token_id == token.id)
+                                            .values(candidate_token_id=existing.id)
+                                        )
+                                        await session.delete(token)
+                                        dup_fixed += 1
+                                    else:
+                                        seen[key] = token
+                                await session.flush()
+                            await session.commit()
+
+                            # Clean up unresolved cashtags (no real contract address)
+                            cashtag_deleted = 0
+                            unresolved = (await session.execute(
+                                sa_select(CandidateToken).where(
+                                    CandidateToken.token_address.startswith("cashtag:")
+                                )
+                            )).scalars().all()
+                            for ct in unresolved:
+                                await session.execute(
+                                    delete(TelegramTokenMention).where(
+                                        TelegramTokenMention.candidate_token_id == ct.id
+                                    )
+                                )
+                                await session.delete(ct)
+                                cashtag_deleted += 1
+                            if cashtag_deleted:
+                                await session.commit()
+
+                            final_token_count = (await session.execute(
+                                sa_select(func.count(CandidateToken.id))
+                            )).scalar() or 0
+
+                            await event_queue.put(fmt("progress", {
+                                "step": "dedup",
+                                "status": f"Dedup done: merged {dup_fixed} duplicates, removed {cashtag_deleted} unresolved → {final_token_count} unique",
+                                "refetch": True,
+                                "total_tokens": final_token_count,
+                                "progress_pct": 66,
+                            }))
+
+                            # ── Step 5: DeepSeek AI Evaluation ─────────────
+                            if settings.DEEPSEEK_API_KEY:
+                                await event_queue.put(fmt("progress", {
+                                    "step": "ai", "status": "DeepSeek AI evaluating tokens...",
+                                    "progress_pct": 68,
+                                }))
+
+                                tokens_to_eval = (await session.execute(
+                                    sa_select(CandidateToken).where(
+                                        CandidateToken.id.in_(
+                                            sa_select(TelegramTokenMention.candidate_token_id)
+                                            .where(TelegramTokenMention.message_timestamp >= offset_date)
+                                            .distinct()
+                                        )
+                                    )
+                                )).scalars().all()
+
+                                async def on_eval_progress(done, total, kept, discarded, pending):
+                                    await event_queue.put(fmt("progress", {
+                                        "step": "ai",
+                                        "status": f"AI: {done}/{total} (✓keep:{kept} ✗discard:{discarded} ?:{pending})",
+                                        "ai_kept": kept, "ai_discarded": discarded, "ai_pending": pending,
+                                        "progress_pct": 68 + int(25 * done / max(total, 1)),
+                                    }))
+
+                                kept, discarded, pending = await evaluator.evaluate_tokens_batch(
+                                    session, tokens_to_eval,
+                                    progress_callback=on_eval_progress,
+                                )
+                                await session.commit()
+
+                                await event_queue.put(fmt("progress", {
+                                    "step": "ai",
+                                    "status": f"AI done: {kept} keep, {discarded} discard, {pending} pending",
+                                    "ai_kept": kept, "ai_discarded": discarded, "ai_pending": pending,
+                                    "progress_pct": 93,
+                                }))
+                            else:
+                                await event_queue.put(fmt("progress", {
+                                    "step": "ai",
+                                    "status": "DeepSeek API key not configured — skipping AI evaluation",
+                                    "progress_pct": 93,
+                                }))
+
+                            # ── Step 6: Final Stats ────────────────────────
+                            final_msgs = (await session.execute(
+                                sa_select(func.count(TelegramMessage.id))
+                            )).scalar() or 0
+                            final_tokens = (await session.execute(
+                                sa_select(func.count(CandidateToken.id))
+                            )).scalar() or 0
+                            final_mentions = (await session.execute(
+                                sa_select(func.count(TelegramTokenMention.id))
+                            )).scalar() or 0
+                            ai_kept = (await session.execute(
+                                sa_select(func.count(CandidateToken.id)).where(
+                                    CandidateToken.ai_decision == 'keep'
+                                )
+                            )).scalar() or 0
 
                             await event_queue.put(fmt("done", {
-                                "status": "done",
-                                "total_messages": final_messages,
+                                "step": "done",
+                                "total_messages": final_msgs,
                                 "total_tokens": final_tokens,
                                 "total_mentions": final_mentions,
+                                "ai_kept": ai_kept,
                                 "sources_done": sources_done,
                                 "sources_total": len(sources),
+                                "progress_pct": 100,
                             }))
-                            logger.info("SSE collection done: %d msgs, %d tokens", final_messages, final_tokens)
+                            logger.info("Pipeline done: %d msgs, %d tokens, %d mentions, %d ai-kept",
+                                        final_msgs, final_tokens, final_mentions, ai_kept)
+
                     except Exception as e:
-                        logger.error("SSE collection failed: %s", e, exc_info=True)
+                        logger.error("Pipeline failed: %s", e, exc_info=True)
                         await event_queue.put(fmt("error", {"message": str(e)}))
                     finally:
                         await client_service.disconnect()
                         await resolver.close()
-                        await event_queue.put(None)  # sentinel
+                        await enricher.close()
+                        await evaluator.close()
+                        await event_queue.put(None)
 
-                # Start collection in background
-                collection_task = aio.ensure_future(run_collection())
+                collection_task = aio.ensure_future(run_pipeline())
 
-                # Yield events as they arrive
                 while True:
                     try:
                         msg = await aio.wait_for(event_queue.get(), timeout=30.0)
                     except aio.TimeoutError:
-                        # send heartbeat
                         yield ": heartbeat\n\n"
                         continue
                     if msg is None:
@@ -521,20 +601,67 @@ async def trigger_collect(
     )
 
 
+@router.post("/reset")
+async def reset_discovery():
+    """
+    Reset everything: stop any running collection, clear all discovery data,
+    reset source checkpoints. Call this before running a fresh discovery.
+    """
+    if _COLLECT_LOCK.locked():
+        return {"status": "busy", "message": "Collection in progress — wait for it to finish or restart the server"}
+
+    from app.core.database import async_session_factory
+    from app.telegram_discovery.models import (
+        TelegramMessage, TelegramTokenMention, CandidateToken,
+        TelegramDiscoveryRanking, TelegramSource,
+    )
+    from sqlalchemy import delete, update
+
+    async with async_session_factory() as session:
+        # Delete all discovery data
+        await session.execute(delete(TelegramTokenMention))
+        await session.execute(delete(TelegramDiscoveryRanking))
+        await session.execute(delete(CandidateToken))
+        await session.execute(delete(TelegramMessage))
+
+        # Reset source checkpoints
+        await session.execute(
+            update(TelegramSource).values(last_message_id=None, last_collected_at=None)
+        )
+
+        await session.commit()
+
+    # Get counts
+    from sqlalchemy import select as sa_select, func
+    async with async_session_factory() as session:
+        remaining_msgs = (await session.execute(sa_select(func.count(TelegramMessage.id)))).scalar() or 0
+        remaining_tokens = (await session.execute(sa_select(func.count(CandidateToken.id)))).scalar() or 0
+        remaining_mentions = (await session.execute(sa_select(func.count(TelegramTokenMention.id)))).scalar() or 0
+        source_count = (await session.execute(
+            sa_select(func.count(TelegramSource.id)).where(TelegramSource.enabled == True)
+        )).scalar() or 0
+
+    return {
+        "status": "reset",
+        "message": "All discovery data cleared, source checkpoints reset",
+        "remaining": {
+            "messages": remaining_msgs,
+            "tokens": remaining_tokens,
+            "mentions": remaining_mentions,
+            "enabled_sources": source_count,
+        }
+    }
+
+
 @router.get("/collect/status")
 async def get_collect_status():
     """Get current collection progress."""
-    import json
-    try:
-        from app.core.redis import get_redis
-        redis = await get_redis()
-        raw = await redis.get("telegram:collect:progress")
-        if raw:
-            return json.loads(raw)
-    except Exception:
-        pass
-    return {"status": "idle", "group": "", "total_messages": 0, "total_tokens": 0,
-            "sources_done": 0, "sources_total": 0}
+    # Check if a collection lock is held (pipeline running)
+    if _COLLECT_LOCK.locked():
+        return {"status": "collecting", "step": "running", "group": "", "total_messages": 0,
+                "total_tokens": 0, "total_mentions": 0, "sources_done": 0, "sources_total": 0}
+    return {"status": "idle", "step": "idle", "group": "", "total_messages": 0,
+            "total_tokens": 0, "total_mentions": 0, "sources_done": 0, "sources_total": 0}
 
 
 # ── Stats ──────────────────────────────────────────────────────────────

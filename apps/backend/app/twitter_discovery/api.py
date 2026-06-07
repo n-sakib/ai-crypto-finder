@@ -12,13 +12,11 @@ Endpoints:
     POST /twitter/collect
 """
 
-import asyncio
 import json
 import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Query, HTTPException
-from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,32 +38,67 @@ from app.twitter_discovery.schemas import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/twitter", tags=["twitter-discovery"])
 
-_COLLECT_LOCK = asyncio.Lock()
-
 
 # Status
 
 @router.get("/discovery/status")
 async def get_twitter_status():
-    configured = bool(settings.TWITTER_USERNAME and settings.TWITTER_PASSWORD)
-    if not configured:
-        return {
-            "configured": False,
-            "message": "Set TWITTER_USERNAME and TWITTER_PASSWORD in apps/backend/.env",
-        }
-
-    # Check if cookies file exists (fast, no network call)
+    """Check if Playwright session is valid for authenticated scraping."""
+    import json as _json
     import os as _os
-    cookies_path = "/app/twitter_cookies.json"
-    if _os.path.exists(cookies_path):
+    from datetime import datetime, timezone as _timezone
+
+    session_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "x_session.json")
+    session_path = _os.path.abspath(session_path)
+
+    if not _os.path.exists(session_path):
         return {
             "configured": True,
-            "message": "Twitter cookies found — ready for discovery",
+            "mode": "playwright",
+            "authenticated": False,
+            "message": "No session file. Run collect_twitter_playwright.py --login on the host.",
         }
-    return {
-        "configured": False,
-        "message": "No cookies file — export from browser (EditThisCookie → x.com → Export JSON → save to apps/backend/twitter_cookies.json)",
-    }
+
+    try:
+        with open(session_path) as f:
+            data = _json.load(f)
+        cookies = data.get("cookies", [])
+        auth_token = next((c for c in cookies if c["name"] == "auth_token"), None)
+        ct0 = next((c for c in cookies if c["name"] == "ct0"), None)
+
+        if not auth_token or not ct0:
+            return {
+                "configured": True, "mode": "playwright",
+                "authenticated": False,
+                "message": "Session file exists but missing auth_token/ct0. Re-run --login.",
+            }
+
+        expires = auth_token.get("expires", 0)
+        if expires > 0:
+            expiry = datetime.fromtimestamp(expires, tz=_timezone.utc)
+            now = datetime.now(_timezone.utc)
+            if now > expiry:
+                return {
+                    "configured": True, "mode": "playwright",
+                    "authenticated": False,
+                    "message": f"Session expired {expiry.strftime('%Y-%m-%d')}. Re-run --login.",
+                }
+            days_left = (expiry - now).days
+        else:
+            days_left = None
+
+        return {
+            "configured": True, "mode": "playwright",
+            "authenticated": True,
+            "days_left": days_left,
+            "message": "Authenticated — ready to collect.",
+        }
+    except Exception as e:
+        return {
+            "configured": True, "mode": "playwright",
+            "authenticated": False,
+            "message": f"Session file corrupt: {e}",
+        }
 
 
 # ── Discovery Rankings ─────────────────────────────────────────────────
@@ -231,79 +264,131 @@ async def get_twitter_stats(
     )
 
 
+# ── Ingest (Playwright → Backend) ──────────────────────────────────────
+
+from pydantic import BaseModel as PydanticBaseModel
+
+class IngestPayload(PydanticBaseModel):
+    candidates: list[dict]
+
+
+@router.post("/ingest")
+async def ingest_playwright_results(
+    payload: IngestPayload,
+    session: AsyncSession = Depends(get_session),
+):
+    """Ingest token candidates scraped by collect_twitter_playwright.py.
+
+    The Playwright script runs on the host machine, scrapes public X profiles,
+    and POSTs extracted candidates here for storage and ranking.
+    """
+    from app.twitter_discovery.client import TwitterClientService
+
+    if not payload.candidates:
+        return {"status": "ok", "stored": 0, "message": "No candidates to ingest"}
+
+    service = TwitterClientService()
+    stats = await service.ingest_playwright_candidates(session, payload.candidates)
+
+    # Also cache in Redis for the discovery pipeline
+    try:
+        from app.core.redis import get_redis
+        import json
+        redis = await get_redis()
+        await redis.set("twitter:pending_candidates", json.dumps(payload.candidates), ex=3600)
+    except Exception:
+        pass
+
+    return {
+        "status": "ok",
+        "candidates_received": len(payload.candidates),
+        "tweets_stored": stats["tweets_stored"],
+        "mentions_stored": stats["mentions_stored"],
+        "tokens_discovered": stats["tokens_discovered"],
+        "errors": stats["errors"],
+    }
+
+
 # ── Collect ────────────────────────────────────────────────────────────
+
+def _check_session() -> tuple[bool, str]:
+    """Check if x_session.json exists and is valid. Returns (ok, message)."""
+    import json as _json
+    import os as _os
+    from datetime import datetime, timezone as _timezone
+
+    session_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "x_session.json")
+    session_path = _os.path.abspath(session_path)
+
+    if not _os.path.exists(session_path):
+        return False, "Not logged in. Run: python collect_twitter_playwright.py --login"
+
+    try:
+        with open(session_path) as f:
+            data = _json.load(f)
+    except Exception:
+        return False, "Session file corrupt. Re-run: python collect_twitter_playwright.py --login"
+
+    cookies = data.get("cookies", [])
+    auth_token = next((c for c in cookies if c["name"] == "auth_token"), None)
+    ct0 = next((c for c in cookies if c["name"] == "ct0"), None)
+
+    if not auth_token or not ct0:
+        return False, "Session incomplete. Re-run: python collect_twitter_playwright.py --login"
+
+    expires = auth_token.get("expires", 0)
+    if expires > 0:
+        expiry = datetime.fromtimestamp(expires, tz=_timezone.utc)
+        if datetime.now(_timezone.utc) > expiry:
+            return False, f"Session expired {expiry.strftime('%Y-%m-%d')}. Re-run: python collect_twitter_playwright.py --login"
+
+    return True, "ok"
+
 
 @router.post("/collect")
 async def trigger_twitter_collect(
-    window: str = Query("24h", description="Time window: 6h, 12h, 24h, 7d"),
+    query: str = Query("", description="Search term (e.g. token symbol) to discover accounts for"),
+    accounts: str = Query("", description="Comma-separated @handles to scrape directly"),
 ):
-    """Run Twitter discovery collection as a foreground SSE stream."""
-    if _COLLECT_LOCK.locked():
-        return {"status": "busy", "message": "Collection already in progress"}
+    """Trigger Playwright-based Twitter scraping.
 
-    async def event_stream():
-        import asyncio as aio
-        from app.twitter_discovery.client import TwitterClientService
-        from app.core.database import async_session_factory
+    Checks auth session first — returns error if not logged in.
+    Spawns collect_twitter_playwright.py on the host machine.
+    Results appear via /twitter/ingest → /twitter/discovery.
+    """
+    import subprocess
+    import os as _os
 
-        logger = logging.getLogger("twitter.collect.sse")
-        event_queue: aio.Queue = aio.Queue()
+    # ── Auth check ──────────────────────────────────────────────────
+    ok, msg = _check_session()
+    if not ok:
+        raise HTTPException(status_code=401, detail=msg)
 
-        def fmt(event: str, data: dict) -> str:
-            return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
+    # ── Find script ─────────────────────────────────────────────────
+    script = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "collect_twitter_playwright.py")
+    script = _os.path.abspath(script)
 
-        async with _COLLECT_LOCK:
-            try:
-                async def run_collection():
-                    """Background task: runs collection, pushes events to queue."""
-                    try:
-                        async with async_session_factory() as session:
-                            await seed_twitter_sources(session)
+    if not _os.path.exists(script):
+        raise HTTPException(
+            status_code=500,
+            detail=f"Script not found at {script}. Run collect_twitter_playwright.py on the host.",
+        )
 
-                            async def progress_callback(data: dict):
-                                await event_queue.put(fmt("progress", data))
+    args = ["python", script]
+    if query:
+        args += ["--search", query]
+    elif accounts:
+        args += ["--accounts", accounts]
 
-                            service = TwitterClientService()
-                            stats = await service.collect(session, progress_callback=progress_callback)
-
-                            await event_queue.put(fmt("done", {
-                                "status": "completed",
-                                "tweets_stored": stats["tweets_stored"],
-                                "mentions_stored": stats["mentions_stored"],
-                                "tokens_discovered": stats["tokens_discovered"],
-                                "errors": stats["errors"],
-                            }))
-                    except Exception as e:
-                        logger.error("Twitter collection failed: %s", e, exc_info=True)
-                        await event_queue.put(fmt("error", {"error": str(e)}))
-                    finally:
-                        await event_queue.put(None)  # sentinel
-
-                # Start collection in background
-                collection_task = aio.ensure_future(run_collection())
-
-                # Yield events as they arrive in real-time
-                while True:
-                    try:
-                        msg = await aio.wait_for(event_queue.get(), timeout=30.0)
-                    except aio.TimeoutError:
-                        yield ": heartbeat\n\n"
-                        continue
-                    if msg is None:
-                        break
-                    yield msg
-                await collection_task
-
-            except Exception as e:
-                logger.error("SSE event stream failed: %s", e, exc_info=True)
-                yield fmt("error", {"error": str(e)})
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    try:
+        subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return {
+            "status": "started",
+            "query": query or None,
+            "accounts": accounts or None,
+            "message": "Scraper started. Results will appear via /twitter/ingest → /twitter/discovery",
+        }
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="Python not found on host.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
