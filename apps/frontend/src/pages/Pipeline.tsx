@@ -232,9 +232,23 @@ export default function Pipeline() {
               </div>
               <div className="text-xs text-[#71717a] mt-0.5">{status?.detail}</div>
             </div>
-            <div className="text-xs text-[#71717a]">{status?.tokens} tokens</div>
+            <div className="text-right">
+              <div className="text-sm font-bold text-[#e4e4e7]">
+                {status?.tokens ?? 0}{status?.total ? ` / ${status.total}` : ''}
+              </div>
+              <div className="text-[10px] text-[#52525b]">tokens</div>
+            </div>
           </div>
-          <div className="flex gap-1.5">
+          {/* Progress bar */}
+          {status?.total ? (
+            <div className="w-full h-1.5 bg-[#1e1e2e] rounded-full overflow-hidden">
+              <div
+                className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 rounded-full transition-all duration-500"
+                style={{ width: `${Math.min(100, ((status.tokens || 0) / status.total) * 100)}%` }}
+              />
+            </div>
+          ) : null}
+          <div className="flex gap-1.5 mt-3">
             {STEPS.map((s, i) => {
               const done = currentStep > i;
               const active = currentStep === i;

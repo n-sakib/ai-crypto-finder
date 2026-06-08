@@ -30,7 +30,10 @@ export function usePipelineStatus() {
   return useQuery<PipelineStatusData>({
     queryKey: ['pipeline-status'],
     queryFn: api.getPipelineStatus,
-    refetchInterval: 15_000,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      return data?.status === 'running' ? 2000 : 15000;
+    },
   });
 }
 

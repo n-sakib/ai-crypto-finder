@@ -72,6 +72,7 @@ export interface PipelineStatusData {
   step: string;
   detail: string;
   tokens: number;
+  total: number;
 }
 
 // Unified pipeline types

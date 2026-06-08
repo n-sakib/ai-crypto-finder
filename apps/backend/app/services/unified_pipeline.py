@@ -18,7 +18,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import httpx
-from sqlalchemy import select, func, desc
+from sqlalchemy import select, func, desc, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -29,6 +29,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 DEXSCREENER_PAIRS_URL = "https://api.dexscreener.com/tokens/v1"
+DEXSCREENER_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search"
 GMGN_TRENDING_URL = "https://gmgn.ai/defi/router/v1/sol/txns/trending"
 
 
@@ -40,10 +41,13 @@ class UnifiedPipeline:
         self._gmgn_client: Optional[httpx.AsyncClient] = None
         self._telegram_client = None
 
-    async def run(self, session: AsyncSession, window: str = "24h", status_callback=None) -> list[dict]:
+    async def run(self, session: AsyncSession, window: str = "24h", status_callback=None, should_stop=None) -> list[dict]:
         """Run the pipeline for a specific time window (5m, 1h, 6h, 24h)."""
         logger.info("=== Unified Pipeline Start (window=%s) ===", window)
         now = datetime.now(timezone.utc)
+
+        def _stop() -> bool:
+            return should_stop and should_stop()
 
         windows = (window,)  # single window
 
@@ -51,67 +55,80 @@ class UnifiedPipeline:
         logger.info("Step 1: Telegram scan...")
         if status_callback:
             status_callback("telegram", "Scanning Telegram groups...")
-        tg_tokens = await self._scan_telegram(session, now, window=window)
+        tg_tokens = await self._scan_telegram(session, now, window=window, status_callback=status_callback)
+        if _stop():
+            return []
         logger.info("  Found %d unique tokens from Telegram", len(tg_tokens))
         if status_callback:
-            status_callback("telegram", f"Found {len(tg_tokens)} tokens in Telegram", len(tg_tokens))
+            status_callback("telegram", f"Found {len(tg_tokens)} tokens", len(tg_tokens))
 
         if not tg_tokens:
             logger.warning("  No tokens found. Pipeline stopping.")
             return []
 
+        total = len(tg_tokens)
+
         # ── Step 2+3: Parallel enrichment (DexScreener + GMGN) ────────
         logger.info("Step 2+3: Parallel enrichment (DexScreener + GMGN)...")
         if status_callback:
-            status_callback("dexscreener", f"Enriching {len(tg_tokens)} tokens (DexScreener + GMGN)...")
+            status_callback("dexscreener", f"0/{total} enriched", 0, total)
+
+        # Progress-tracking wrapper — tracks both DexScreener matches & GMGN enrichment
+        def enrichment_progress(label: str):
+            dex = sum(1 for t in tg_tokens if t.get("pair_address"))
+            gmgn = sum(1 for t in tg_tokens if t.get("gmgn_score") is not None)
+            if status_callback:
+                status_callback("dexscreener",
+                    f"Dex:{dex}/{total}  GMGN:{gmgn}",
+                    max(dex, gmgn), total)
 
         await asyncio.gather(
-            self._enrich_dexscreener(tg_tokens),
-            self._enrich_gmgn(tg_tokens),
+            self._enrich_dexscreener(tg_tokens, enrichment_progress),
+            self._enrich_gmgn(tg_tokens, enrichment_progress),
         )
 
-        enriched = sum(1 for t in tg_tokens if t.get("pair_address"))
-        logger.info("  Enrichment complete: DexScreener %d/%d matched", enriched, len(tg_tokens))
+        dex_matched = sum(1 for t in tg_tokens if t.get("pair_address"))
+        gmgn_scored = sum(1 for t in tg_tokens if t.get("gmgn_score") is not None)
+        logger.info("  Enrichment complete: Dex:%d/%d GMGN:%d", dex_matched, total, gmgn_scored)
         if status_callback:
-            status_callback("dexscreener", f"{enriched}/{len(tg_tokens)} enriched", len(tg_tokens))
+            status_callback("dexscreener",
+                f"Dex:{dex_matched}/{total}  GMGN:{gmgn_scored} ✓",
+                max(dex_matched, gmgn_scored), total)
 
         # ── Step 3: Dedup ──────────────────────────────────────────────
-        logger.info("Step 4: Dedup...")
+        logger.info("Step 3: Dedup...")
         if status_callback:
-            status_callback("dedup", f"Deduplicating {len(tg_tokens)} tokens...")
+            status_callback("dedup", f"Deduplicating {total} tokens...", total, total)
         deduped = self._dedup(tg_tokens)
         logger.info("  %d tokens after dedup", len(deduped))
         if status_callback:
-            status_callback("dedup", f"{len(deduped)} tokens after dedup", len(deduped))
+            status_callback("dedup", f"{len(deduped)} tokens after dedup", len(deduped), total)
 
-        # ── Step 5: Windowed Aggregation ───────────────────────────────
-        logger.info("Step 5: Windowed aggregation (%s)...", window)
+        # ── Step 4: Windowed Aggregation ───────────────────────────────
+        logger.info("Step 4: Windowed aggregation (%s)...", window)
         if status_callback:
-            status_callback("aggregate", f"Computing {window} window metrics...")
+            status_callback("aggregate", f"Computing {window} window metrics for {len(deduped)} tokens...", len(deduped), total)
         for token in deduped:
             await self._aggregate_window(session, token, window, now)
         if status_callback:
-            status_callback("aggregate", f"Windowed aggregation complete ({window})", len(deduped))
+            status_callback("aggregate", f"Windowed aggregation complete ({window})", len(deduped), total)
 
-        # ── Step 6: Persist ────────────────────────────────────────────
-        logger.info("Step 6: Persisting...")
+        # ── Step 5: Persist ────────────────────────────────────────────
+        logger.info("Step 5: Persisting...")
         if status_callback:
-            status_callback("persist", "Saving to database...")
+            status_callback("persist", f"Saving {len(deduped)} tokens to database...", len(deduped), total)
         count = await self._persist(session, deduped, now)
         logger.info("  Saved %d tokens", count)
         if status_callback:
-            status_callback("persist", f"Saved {count} tokens", count)
+            status_callback("persist", f"Saved {count} tokens ✓", count, total)
 
         logger.info("Pipeline Complete: %d tokens persisted", count)
         return deduped
 
     # ── Step 1: Telegram ───────────────────────────────────────────────
 
-    async def _scan_telegram(self, session: AsyncSession, now: datetime, window: str = "24h") -> list[dict]:
-        """Scan all Telegram groups and extract tokens with per-window social stats.
-
-        Only messages within the selected time window are processed.
-        """
+    async def _scan_telegram(self, session: AsyncSession, now: datetime, window: str = "24h", status_callback=None) -> list[dict]:
+        """Scan all Telegram groups in parallel and extract tokens with per-window social stats."""
         from telethon import TelegramClient
         from telethon.tl.types import Message, MessageEntityTextUrl
         from app.telegram_discovery.extractor import TokenExtractor
@@ -137,20 +154,23 @@ class UnifiedPipeline:
                    "6h": timedelta(hours=6), "24h": timedelta(hours=24)}
         cutoff = now - deltas[window]
 
-        # token_map: keyed by (chain, addr)
-        # Each token tracks per-window {mentions, users: set, groups: set}
-        token_map: dict[str, dict] = {}
+        # Shared token map (built by merging per-source results)
+        merged_map: dict[str, dict] = {}
+        sources_done = 0
 
-        for source in sources:
+        async def scan_one(source) -> dict[str, dict]:
+            """Scan a single source, return local token_map."""
+            nonlocal sources_done
+            local_map: dict[str, dict] = {}
             try:
                 entity = await telethon.get_entity(source.source_id)
 
-                # Fetch all messages within the time window — paginate by time, not count
-                all_messages = []
+                # Fetch messages within the time window
+                all_messages: list = []
                 max_id = 0
                 while True:
                     batch = await telethon.get_messages(
-                        entity, limit=200, offset_id=max_id
+                        entity, limit=500, offset_id=max_id
                     )
                     if not batch:
                         break
@@ -161,44 +181,43 @@ class UnifiedPipeline:
                             continue
                         msg_ts = m.date.replace(tzinfo=timezone.utc)
                         if msg_ts < cutoff:
-                            break  # older than window — stop
+                            break
                         in_window.append(m)
 
                     all_messages.extend(in_window)
 
-                    # Stop if we hit messages outside the window
                     if len(in_window) < len(batch):
                         break
-
                     max_id = batch[-1].id
 
                 messages = all_messages
             except Exception:
-                continue
+                messages = []
 
+            # Extract tokens from messages
             for msg in messages:
                 if not isinstance(msg, Message) or not msg.message:
                     continue
-
                 msg_ts = msg.date.replace(tzinfo=timezone.utc) if msg.date else now
                 sender_id = str(msg.sender_id) if msg.sender_id else "unknown"
-
                 text = self._get_full_text(msg)
                 refs = extractor.extract(text)
                 if not refs:
                     continue
-
-                sender_id = str(msg.sender_id) if msg.sender_id else "unknown"
 
                 for ref in refs:
                     addr = ref.token_address
                     if not addr:
                         continue
                     chain = ref.chain or "solana"
+                    if chain in ("sol",):
+                        chain = "solana"
+                    if chain in ("eth",):
+                        chain = "ethereum"
                     key = f"{chain}:{addr}"
 
-                    if key not in token_map:
-                        token_map[key] = {
+                    if key not in local_map:
+                        local_map[key] = {
                             "chain": chain,
                             "token_address": addr,
                             "symbol": ref.symbol,
@@ -208,26 +227,48 @@ class UnifiedPipeline:
                             "tg_mentions": 0,
                         }
                         for w in deltas:
-                            token_map[key][f"_w_{w}_mentions"] = 0
-                            token_map[key][f"_w_{w}_users"] = set()
-                            token_map[key][f"_w_{w}_groups"] = set()
+                            local_map[key][f"_w_{w}_mentions"] = 0
+                            local_map[key][f"_w_{w}_users"] = set()
+                            local_map[key][f"_w_{w}_groups"] = set()
 
-                    t = token_map[key]
+                    t = local_map[key]
                     t["all_groups"].add(source.name)
                     t["tg_mentions"] += 1
 
-                    # Bucket into time windows
                     for w, delta in deltas.items():
                         if msg_ts >= now - delta:
                             t[f"_w_{w}_mentions"] += 1
                             t[f"_w_{w}_users"].add(sender_id)
                             t[f"_w_{w}_groups"].add(source.name)
 
+            # Merge local map into shared merged_map
+            for key, local_t in local_map.items():
+                if key in merged_map:
+                    mt = merged_map[key]
+                    mt["tg_mentions"] += local_t["tg_mentions"]
+                    mt["all_groups"] |= local_t["all_groups"]
+                    for w in deltas:
+                        mt[f"_w_{w}_mentions"] += local_t[f"_w_{w}_mentions"]
+                        mt[f"_w_{w}_users"] |= local_t[f"_w_{w}_users"]
+                        mt[f"_w_{w}_groups"] |= local_t[f"_w_{w}_groups"]
+                else:
+                    merged_map[key] = local_t
+
+            sources_done += 1
+            if status_callback:
+                status_callback("telegram",
+                    f"{source.name}: {len(messages)} msgs, {len(merged_map)} tokens total",
+                    len(merged_map))
+            return local_map
+
+        # Scan all sources in parallel (up to 5 concurrent)
+        await asyncio.gather(*[scan_one(s) for s in sources])
+
         await telethon.disconnect()
 
         # Finalize: collapse sets to counts
         result_list = []
-        for t in token_map.values():
+        for t in merged_map.values():
             t["group_count"] = len(t.pop("all_groups"))
             for w in deltas:
                 t[f"tg_mentions_{w}"] = t.pop(f"_w_{w}_mentions")
@@ -253,7 +294,7 @@ class UnifiedPipeline:
 
     # ── Step 2: DexScreener (batch, rate-limited) ──────────────────
 
-    async def _enrich_dexscreener(self, tokens: list[dict]):
+    async def _enrich_dexscreener(self, tokens: list[dict], progress_cb=None):
         """Enrich tokens using DexScreener batch endpoint with rate limiting.
 
         Supports all chains DexScreener covers: solana, ethereum, bsc, base,
@@ -358,10 +399,70 @@ class UnifiedPipeline:
                             logger.warning("DexScreener batch failed after %d retries", MAX_RETRIES)
 
                 await asyncio.sleep(RATE_LIMIT_DELAY)
+                # Report progress after each batch
+                if progress_cb:
+                    progress_cb("DexScreener")
+
+            # Fallback: search API for tokens not found via batch endpoint
+            unmatched = [t for t in chain_tokens if not t.get("pair_address")]
+            if unmatched:
+                logger.debug("  Search-fallback for %d unmatched tokens on %s", len(unmatched), ds_chain)
+            for token in unmatched[:50]:  # limit search fallback to 50 per chain
+                addr = token.get("token_address")
+                if not addr:
+                    continue
+                try:
+                    resp = await self._dex_client.get(
+                        f"{DEXSCREENER_SEARCH_URL}", params={"q": addr}
+                    )
+                    if resp.status_code != 200:
+                        continue
+                    data = resp.json()
+                    search_pairs = data.get("pairs", [])
+                    for p in search_pairs:
+                        base = p.get("baseToken", {})
+                        # Match: token address OR pair address (Telegram may catch pair URLs)
+                        matched = base.get("address") == addr
+                        is_pair_addr = p.get("pairAddress") == addr
+                        if not matched and not is_pair_addr:
+                            continue
+                        if is_pair_addr and not matched:
+                            # Our "token" is actually a pair address — use real token
+                            token["token_address"] = base.get("address")
+                            token["symbol"] = token.get("symbol") or base.get("symbol")
+                        else:
+                            token["symbol"] = token.get("symbol") or base.get("symbol")
+                        token["name"] = base.get("name")
+                        token["dex_url"] = p.get("url")
+                        token["pair_address"] = p.get("pairAddress")
+                        token["dex_id"] = p.get("dexId")
+                        price = float(p.get("priceUsd", 0) or 0)
+                        for w in ("5m", "1h", "6h", "24h"):
+                            token[f"price_{w}"] = price
+                        pc = p.get("priceChange", {})
+                        vol = p.get("volume", {})
+                        for w, wk in [("5m", "m5"), ("1h", "h1"), ("6h", "h6"), ("24h", "h24")]:
+                            txns = p.get("txns", {}).get(wk, {})
+                            token[f"price_change_{w}"] = pc.get(wk)
+                            token[f"volume_{w}"] = vol.get(wk)
+                            token[f"buys_{w}"] = txns.get("buys")
+                            token[f"sells_{w}"] = txns.get("sells")
+                            token[f"trades_{w}"] = (txns.get("buys") or 0) + (txns.get("sells") or 0)
+                        liq = p.get("liquidity", {})
+                        for w in ("5m", "1h", "6h", "24h"):
+                            token[f"liquidity_{w}"] = liq.get("usd")
+                        for w in ("5m", "1h", "6h", "24h"):
+                            token[f"market_cap_{w}"] = p.get("marketCap")
+                        if progress_cb:
+                            progress_cb("DexScreener")
+                        break  # first matching pair
+                    await asyncio.sleep(0.3)  # rate limit for search API
+                except Exception:
+                    pass
 
     # ── Step 3: GMGN ───────────────────────────────────────────────────
 
-    async def _enrich_gmgn(self, tokens: list[dict]):
+    async def _enrich_gmgn(self, tokens: list[dict], progress_cb=None):
         """Enrich via GMGN OpenAPI. Uses X-APIKEY header + timestamp + client_id.
         Skips if API key missing. Only processes Solana tokens."""
         api_key = settings.GMGN_API_KEY
@@ -387,7 +488,7 @@ class UnifiedPipeline:
             return
 
         # Rate limit: 1 req/s (GMGN default)
-        for token in solana_tokens:
+        for i, token in enumerate(solana_tokens):
             addr = token.get("token_address")
             chain = token.get("chain", "solana")
             if not addr:
@@ -415,6 +516,8 @@ class UnifiedPipeline:
             except Exception as e:
                 logger.debug("GMGN enrich failed for %s: %s", addr[:12], e)
             await asyncio.sleep(0.2)  # gentle rate limiting
+            if progress_cb and i % 5 == 0:
+                progress_cb(f"GMGN {i+1}/{len(solana_tokens)}")
 
     # ── Step 4: Dedup ──────────────────────────────────────────────────
 
@@ -476,11 +579,16 @@ class UnifiedPipeline:
                         if key in t:
                             data[key] = t[key]
 
-                # Upsert via insert ... on conflict
+                # Upsert — only overwrite fields that have actual values
                 stmt = pg_insert(UnifiedToken).values(**data)
+                update_cols = {
+                    k: stmt.excluded[k]
+                    for k in data
+                    if k not in ("chain", "token_address") and data[k] is not None
+                }
                 stmt = stmt.on_conflict_do_update(
                     index_elements=["chain", "token_address"],
-                    set_={k: stmt.excluded[k] for k in data if k not in ("chain", "token_address")},
+                    set_=update_cols,
                 )
                 await session.execute(stmt)
                 saved += 1

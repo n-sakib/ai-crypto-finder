@@ -21,12 +21,25 @@ router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
 _PIPELINE_LOCK = asyncio.Lock()
 _pipeline_status: dict = {"status": "idle", "step": "", "detail": "", "tokens": 0}
+_stop_requested = False
 
 
 @router.get("/status")
 async def get_pipeline_status():
     """Get current pipeline run status."""
     return _pipeline_status
+
+
+@router.post("/stop")
+async def stop_pipeline():
+    """Request the running pipeline to stop."""
+    global _stop_requested
+    if _PIPELINE_LOCK.locked():
+        _stop_requested = True
+        _pipeline_status["status"] = "stopping"
+        _pipeline_status["detail"] = "Stop requested..."
+        return {"status": "stopping"}
+    return {"status": "not_running"}
 
 
 @router.post("/run")
@@ -38,25 +51,34 @@ async def run_pipeline(window: str = Query("24h", description="Time window: 5m, 
         return {"status": "already_running"}
 
     async def do_run():
-        global _pipeline_status
+        global _pipeline_status, _stop_requested
+        _stop_requested = False
         async with _PIPELINE_LOCK:
             from app.core.database import async_session_factory
 
-            def update_step(step: str, detail: str = "", tokens: int = 0):
+            def update_step(step: str, detail: str = "", tokens: int = 0, total: int = 0):
                 _pipeline_status["step"] = step
                 _pipeline_status["detail"] = detail
                 if tokens:
                     _pipeline_status["tokens"] = tokens
+                if total:
+                    _pipeline_status["total"] = total
 
             async with async_session_factory() as session:
                 try:
                     _pipeline_status = {"status": "running", "step": "init", "detail": f"Running pipeline for {window} window...", "tokens": 0}
-                    result = await pipeline.run(session, window=window, status_callback=update_step)
-                    _pipeline_status = {
-                        "status": "done",
-                        "step": "complete",
-                        "detail": f"Pipeline complete ({window}): {len(result)} tokens",
-                        "tokens": len(result),
+                    result = await pipeline.run(session, window=window, status_callback=update_step,
+                                                should_stop=lambda: _stop_requested)
+                    if _stop_requested:
+                        _pipeline_status = {"status": "idle", "step": "", "detail": "Pipeline stopped.", "tokens": 0}
+                    elif not result:
+                        _pipeline_status = {"status": "idle", "step": "", "detail": "No tokens found.", "tokens": 0}
+                    else:
+                        _pipeline_status = {
+                            "status": "done",
+                            "step": "complete",
+                            "detail": f"Pipeline complete ({window}): {len(result)} tokens",
+                            "tokens": len(result),
                     }
                 except Exception as e:
                     logger.error("Pipeline failed: %s", e, exc_info=True)
