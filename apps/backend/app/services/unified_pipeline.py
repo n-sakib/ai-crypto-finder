@@ -38,6 +38,40 @@ GMGN_ENRICHMENT_LIMITS = {
     "6h": 100,
     "24h": 150,
 }
+DEXSCREENER_REQUESTS_PER_MINUTE = 240  # Official token/search limit is 300 rpm; keep headroom.
+DEXSCREENER_MAX_CONCURRENCY = 8
+DEXSCREENER_SEARCH_FALLBACK_LIMIT_PER_CHAIN = 50
+TELEGRAM_SOURCE_CONCURRENCY = 5
+TELEGRAM_SOURCE_TIMEOUT_SECONDS = {
+    "5m": 15,
+    "1h": 20,
+    "6h": 35,
+    "24h": 60,
+}
+TELEGRAM_MAX_BATCHES_PER_SOURCE = {
+    "5m": 1,
+    "1h": 2,
+    "6h": 4,
+    "24h": 8,
+}
+
+
+class AsyncRateLimiter:
+    """Simple shared request spacer for external APIs."""
+
+    def __init__(self, requests_per_minute: int):
+        self._interval = 60.0 / requests_per_minute
+        self._lock = asyncio.Lock()
+        self._next_at = 0.0
+
+    async def wait(self):
+        loop = asyncio.get_running_loop()
+        async with self._lock:
+            now = loop.time()
+            if now < self._next_at:
+                await asyncio.sleep(self._next_at - now)
+                now = loop.time()
+            self._next_at = now + self._interval
 
 
 class UnifiedPipeline:
@@ -58,12 +92,16 @@ class UnifiedPipeline:
 
         # ── Cleanup: remove old unenriched tokens from DB ─────────────
         from sqlalchemy import delete as sqla_delete
+        from sqlalchemy import update as sqla_update
+        await session.execute(
+            sqla_update(UnifiedToken).values(gmgn_score=None, gmgn_hot_level=None)
+        )
         result = await session.execute(
             sqla_delete(UnifiedToken).where(UnifiedToken.pair_address.is_(None))
         )
         if result.rowcount:
             logger.info("  Cleaned up %d unenriched tokens from previous runs", result.rowcount)
-            await session.commit()
+        await session.commit()
 
         windows = (window,)  # single window
 
@@ -121,52 +159,38 @@ class UnifiedPipeline:
             logger.warning("  No Telegram or trending tokens found. Pipeline stopping.")
             return []
 
-        # ── Step 3+4: Parallel enrichment (DexScreener + GMGN) ────────
-        logger.info("Step 3+4: Parallel enrichment (DexScreener + GMGN)...")
+        # ── Step 3: DexScreener enrichment ────────────────────────────
+        logger.info("Step 3: DexScreener enrichment...")
         if status_callback:
             status_callback("dexscreener", f"0/{total} enriched", 0, total)
 
-        gmgn_total = min(
-            GMGN_ENRICHMENT_LIMITS.get(window, 100),
-            sum(1 for t in tg_tokens if t.get("chain", "solana") in ("solana", "sol")),
-        )
         dex_checked = 0
-        gmgn_checked = 0
 
-        # Progress-tracking wrapper — tracks both DexScreener matches & GMGN enrichment.
+        # Progress-tracking wrapper — tracks DexScreener checked vs matched.
         def enrichment_progress(label: str):
-            nonlocal dex_checked, gmgn_checked
+            nonlocal dex_checked
             if label.startswith("DexScreener "):
                 try:
                     dex_checked = int(label.split(" ", 1)[1].split("/", 1)[0])
                 except (IndexError, ValueError):
                     pass
-            if label.startswith("GMGN "):
-                try:
-                    gmgn_checked = int(label.split(" ", 1)[1].split("/", 1)[0])
-                except (IndexError, ValueError):
-                    pass
             dex = sum(1 for t in tg_tokens if t.get("pair_address"))
-            gmgn = sum(1 for t in tg_tokens if t.get("gmgn_score") is not None)
             if status_callback:
                 status_callback("dexscreener",
-                    f"Dex matched:{dex} checked:{dex_checked}/{total}  GMGN scored:{gmgn} checked:{gmgn_checked}/{gmgn_total}",
-                    max(dex_checked, gmgn_checked, dex, gmgn), total)
+                    f"Dex matched:{dex} checked:{dex_checked}/{total}",
+                    max(dex_checked, dex), total)
 
-        await asyncio.gather(
-            self._enrich_dexscreener(tg_tokens, enrichment_progress, should_stop=_stop),
-            self._enrich_gmgn(tg_tokens, enrichment_progress, should_stop=_stop, window=window),
-        )
+        await self._enrich_dexscreener(tg_tokens, enrichment_progress, should_stop=_stop)
         if _stop():
             return []
 
         dex_matched = sum(1 for t in tg_tokens if t.get("pair_address"))
         gmgn_scored = sum(1 for t in tg_tokens if t.get("gmgn_score") is not None)
-        logger.info("  Enrichment complete: Dex:%d/%d GMGN:%d", dex_matched, total, gmgn_scored)
+        logger.info("  Enrichment complete: Dex:%d/%d GMGN skipped:%d", dex_matched, total, gmgn_scored)
         if status_callback:
             status_callback("dexscreener",
-                f"Dex matched:{dex_matched} checked:{total}/{total}  GMGN scored:{gmgn_scored} checked:{gmgn_checked}/{gmgn_total} ✓",
-                max(dex_matched, gmgn_scored), total)
+                f"Dex matched:{dex_matched} checked:{total}/{total} ✓",
+                dex_matched, total)
 
         # ── Step 3: Dedup ──────────────────────────────────────────────
         logger.info("Step 3: Dedup...")
@@ -237,126 +261,144 @@ class UnifiedPipeline:
         merged_map: dict[str, dict] = {}
         sources_done = 0
         messages_scanned = 0
+        telegram_semaphore = asyncio.Semaphore(TELEGRAM_SOURCE_CONCURRENCY)
+        telegram_lock = asyncio.Lock()
+        source_timeout = TELEGRAM_SOURCE_TIMEOUT_SECONDS.get(window, 35)
+        max_batches = TELEGRAM_MAX_BATCHES_PER_SOURCE.get(window, 4)
 
         async def scan_one(source) -> dict[str, dict]:
             """Scan a single source, return local token_map."""
             nonlocal sources_done, messages_scanned
             local_map: dict[str, dict] = {}
+            messages = []
+            timed_out = False
             try:
-                entity = await telethon.get_entity(source.source_id)
+                async with telegram_semaphore:
+                    async with asyncio.timeout(source_timeout):
+                        entity = await telethon.get_entity(source.source_id)
 
-                # Fetch messages within the time window
-                all_messages: list = []
-                max_id = 0
-                while True:
-                    batch = await telethon.get_messages(
-                        entity, limit=500, offset_id=max_id
-                    )
-                    if not batch:
-                        break
+                        # Fetch messages within the time window
+                        all_messages: list = []
+                        max_id = 0
+                        batches_fetched = 0
+                        while batches_fetched < max_batches:
+                            batch = await telethon.get_messages(
+                                entity, limit=500, offset_id=max_id
+                            )
+                            batches_fetched += 1
+                            if not batch:
+                                break
 
-                    in_window: list = []
-                    for m in batch:
-                        if not m.date:
-                            continue
-                        msg_ts = m.date.replace(tzinfo=timezone.utc)
-                        if msg_ts < cutoff:
-                            break
-                        in_window.append(m)
+                            in_window: list = []
+                            for m in batch:
+                                if not m.date:
+                                    continue
+                                msg_ts = m.date.replace(tzinfo=timezone.utc)
+                                if msg_ts < cutoff:
+                                    break
+                                in_window.append(m)
 
-                    all_messages.extend(in_window)
+                            all_messages.extend(in_window)
 
-                    if len(in_window) < len(batch):
-                        break
-                    max_id = batch[-1].id
+                            if len(in_window) < len(batch):
+                                break
+                            max_id = batch[-1].id
 
-                messages = all_messages
+                        messages = all_messages
+            except TimeoutError:
+                timed_out = True
+                messages = []
             except Exception:
                 messages = []
 
-            # Extract tokens from messages
-            for msg in messages:
-                if not isinstance(msg, Message) or not msg.message:
-                    continue
-                msg_ts = msg.date.replace(tzinfo=timezone.utc) if msg.date else now
-                sender_id = str(msg.sender_id) if msg.sender_id else "unknown"
-                text = self._get_full_text(msg)
-                refs = extractor.extract(text)
-                if not refs:
-                    continue
-
-                for ref in refs:
-                    addr = ref.token_address
-                    if not addr:
+            try:
+                # Extract tokens from messages
+                for msg in messages:
+                    if not isinstance(msg, Message) or not msg.message:
                         continue
-                    chain = ref.chain or "solana"
-                    if chain in ("sol",):
-                        chain = "solana"
-                    if chain in ("eth",):
-                        chain = "ethereum"
-                    key = f"{chain}:{addr}"
+                    msg_ts = msg.date.replace(tzinfo=timezone.utc) if msg.date else now
+                    sender_id = str(msg.sender_id) if msg.sender_id else "unknown"
+                    text = self._get_full_text(msg)
+                    refs = extractor.extract(text)
+                    if not refs:
+                        continue
 
-                    if key not in local_map:
-                        local_map[key] = {
-                            "chain": chain,
-                            "token_address": addr,
-                            "symbol": ref.symbol,
-                            "name": None,
-                            "group_count": 0,
-                            "all_groups": set(),
-                            "tg_mentions": 0,
-                        }
+                    for ref in refs:
+                        addr = ref.token_address
+                        if not addr:
+                            continue
+                        chain = ref.chain or "solana"
+                        if chain in ("sol",):
+                            chain = "solana"
+                        if chain in ("eth",):
+                            chain = "ethereum"
+                        key = f"{chain}:{addr}"
+
+                        if key not in local_map:
+                            local_map[key] = {
+                                "chain": chain,
+                                "token_address": addr,
+                                "symbol": ref.symbol,
+                                "name": None,
+                                "group_count": 0,
+                                "all_groups": set(),
+                                "tg_mentions": 0,
+                            }
+                            for w in deltas:
+                                local_map[key][f"_w_{w}_mentions"] = 0
+                                local_map[key][f"_w_{w}_users"] = set()
+                                local_map[key][f"_w_{w}_groups"] = set()
+                                local_map[key][f"_w_{w}_reactions"] = 0
+                                local_map[key][f"_w_{w}_replies"] = 0
+
+                        t = local_map[key]
+                        t["all_groups"].add(source.name)
+                        t["tg_mentions"] += 1
+
+                        # Per-message social stats
+                        reactions = getattr(msg, 'reactions', None)
+                        reactions_count = 0
+                        if reactions and hasattr(reactions, 'results') and reactions.results:
+                            reactions_count = sum(r.count for r in reactions.results)
+                        replies_count = getattr(msg, 'replies', None)
+                        replies_count = replies_count.replies if replies_count and hasattr(replies_count, 'replies') else 0
+
+                        for w, delta in deltas.items():
+                            if msg_ts >= now - delta:
+                                t[f"_w_{w}_mentions"] += 1
+                                t[f"_w_{w}_users"].add(sender_id)
+                                t[f"_w_{w}_groups"].add(source.name)
+                                t[f"_w_{w}_reactions"] += reactions_count
+                                t[f"_w_{w}_replies"] += replies_count
+            except Exception:
+                local_map = {}
+
+            async with telegram_lock:
+                # Merge local map into shared merged_map
+                messages_scanned += len(messages)
+                for key, local_t in local_map.items():
+                    if key in merged_map:
+                        mt = merged_map[key]
+                        mt["tg_mentions"] += local_t["tg_mentions"]
+                        mt["all_groups"] |= local_t["all_groups"]
                         for w in deltas:
-                            local_map[key][f"_w_{w}_mentions"] = 0
-                            local_map[key][f"_w_{w}_users"] = set()
-                            local_map[key][f"_w_{w}_groups"] = set()
-                            local_map[key][f"_w_{w}_reactions"] = 0
-                            local_map[key][f"_w_{w}_replies"] = 0
+                            mt[f"_w_{w}_mentions"] += local_t[f"_w_{w}_mentions"]
+                            mt[f"_w_{w}_users"] |= local_t[f"_w_{w}_users"]
+                            mt[f"_w_{w}_groups"] |= local_t[f"_w_{w}_groups"]
+                            mt[f"_w_{w}_reactions"] += local_t[f"_w_{w}_reactions"]
+                            mt[f"_w_{w}_replies"] += local_t[f"_w_{w}_replies"]
+                    else:
+                        merged_map[key] = local_t
 
-                    t = local_map[key]
-                    t["all_groups"].add(source.name)
-                    t["tg_mentions"] += 1
-
-                    # Per-message social stats
-                    reactions = getattr(msg, 'reactions', None)
-                    reactions_count = 0
-                    if reactions and hasattr(reactions, 'results') and reactions.results:
-                        reactions_count = sum(r.count for r in reactions.results)
-                    replies_count = getattr(msg, 'replies', None)
-                    replies_count = replies_count.replies if replies_count and hasattr(replies_count, 'replies') else 0
-
-                    for w, delta in deltas.items():
-                        if msg_ts >= now - delta:
-                            t[f"_w_{w}_mentions"] += 1
-                            t[f"_w_{w}_users"].add(sender_id)
-                            t[f"_w_{w}_groups"].add(source.name)
-                            t[f"_w_{w}_reactions"] += reactions_count
-                            t[f"_w_{w}_replies"] += replies_count
-
-            # Merge local map into shared merged_map
-            messages_scanned += len(messages)
-            for key, local_t in local_map.items():
-                if key in merged_map:
-                    mt = merged_map[key]
-                    mt["tg_mentions"] += local_t["tg_mentions"]
-                    mt["all_groups"] |= local_t["all_groups"]
-                    for w in deltas:
-                        mt[f"_w_{w}_mentions"] += local_t[f"_w_{w}_mentions"]
-                        mt[f"_w_{w}_users"] |= local_t[f"_w_{w}_users"]
-                        mt[f"_w_{w}_groups"] |= local_t[f"_w_{w}_groups"]
-                        mt[f"_w_{w}_reactions"] += local_t[f"_w_{w}_reactions"]
-                        mt[f"_w_{w}_replies"] += local_t[f"_w_{w}_replies"]
-                else:
-                    merged_map[key] = local_t
-
-            sources_done += 1
-            if status_callback:
-                status_callback("telegram",
-                    f"Sources:{sources_done}/{source_total}  messages:{messages_scanned}  unique tokens:{len(merged_map)}  last:{source.name}",
-                    sources_done, source_total)
+                sources_done += 1
+                if status_callback:
+                    timeout_note = " timeout" if timed_out else ""
+                    status_callback("telegram",
+                        f"Sources:{sources_done}/{source_total}  messages:{messages_scanned}  unique tokens:{len(merged_map)}  last:{source.name}{timeout_note}",
+                        sources_done, source_total)
             return local_map
 
-        # Scan all sources in parallel (up to 5 concurrent)
+        # Scan sources with bounded concurrency to avoid overloading Telegram.
         await asyncio.gather(*[scan_one(s) for s in sources])
 
         await telethon.disconnect()
@@ -364,13 +406,16 @@ class UnifiedPipeline:
         # Finalize: collapse sets to counts
         result_list = []
         for t in merged_map.values():
-            t["group_count"] = len(t.pop("all_groups"))
+            source_groups = list(t.pop("all_groups"))
+            t["group_count"] = len(source_groups)
+            t["source_groups"] = source_groups
             for w in deltas:
                 t[f"tg_mentions_{w}"] = t.pop(f"_w_{w}_mentions")
                 t[f"tg_users_{w}"] = len(t.pop(f"_w_{w}_users"))
                 t[f"tg_groups_{w}"] = len(t.pop(f"_w_{w}_groups"))
                 t[f"tg_reactions_{w}"] = t.pop(f"_w_{w}_reactions")
                 t[f"tg_replies_{w}"] = t.pop(f"_w_{w}_replies")
+            t["discovery_methods"] = []
             result_list.append(t)
 
         return result_list
@@ -422,27 +467,59 @@ class UnifiedPipeline:
             chain_groups.setdefault(ds_chain, []).append(t)
 
         BATCH_SIZE = 30
-        RATE_LIMIT_DELAY = 1.2
         MAX_RETRIES = 3
         dex_checked = 0
         dex_total = len(tokens)
+        rate_limiter = AsyncRateLimiter(DEXSCREENER_REQUESTS_PER_MINUTE)
+        semaphore = asyncio.Semaphore(DEXSCREENER_MAX_CONCURRENCY)
+        progress_lock = asyncio.Lock()
 
-        for ds_chain, chain_tokens in chain_groups.items():
+        def apply_pair(token: dict, pair: dict, addr: str | None = None) -> None:
+            base = pair.get("baseToken", {})
+            if addr and pair.get("pairAddress") == addr and base.get("address") != addr:
+                token["token_address"] = base.get("address")
+            token["symbol"] = token.get("symbol") or base.get("symbol")
+            token["name"] = base.get("name")
+            token["dex_url"] = pair.get("url")
+            token["pair_address"] = pair.get("pairAddress")
+            token["dex_id"] = pair.get("dexId")
+
+            price = float(pair.get("priceUsd", 0) or 0)
+            for w in ("5m", "1h", "6h", "24h"):
+                token[f"price_{w}"] = price
+
+            pc = pair.get("priceChange", {})
+            vol = pair.get("volume", {})
+            for w, wk in [("5m", "m5"), ("1h", "h1"), ("6h", "h6"), ("24h", "h24")]:
+                txns = pair.get("txns", {}).get(wk, {})
+                token[f"price_change_{w}"] = pc.get(wk)
+                token[f"volume_{w}"] = vol.get(wk)
+                token[f"buys_{w}"] = txns.get("buys")
+                token[f"sells_{w}"] = txns.get("sells")
+                token[f"trades_{w}"] = (txns.get("buys") or 0) + (txns.get("sells") or 0)
+
+            liq = pair.get("liquidity", {})
+            for w in ("5m", "1h", "6h", "24h"):
+                token[f"liquidity_{w}"] = liq.get("usd")
+                token[f"market_cap_{w}"] = pair.get("marketCap")
+
+        async def report_checked(count: int) -> None:
+            nonlocal dex_checked
+            async with progress_lock:
+                dex_checked += count
+                if progress_cb:
+                    progress_cb(f"DexScreener {dex_checked}/{dex_total}")
+
+        async def fetch_batch(ds_chain: str, chain_tokens: list[dict], batch: list[str], addr_to_idx: dict[str, int]) -> None:
             if should_stop and should_stop():
                 return
-            addrs = [t["token_address"] for t in chain_tokens]
-            addr_to_idx = {addr: i for i, addr in enumerate(addrs)}
-
-            for i in range(0, len(addrs), BATCH_SIZE):
-                if should_stop and should_stop():
-                    return
-                batch = addrs[i : i + BATCH_SIZE]
-                addr_list = ",".join(batch)
-
+            addr_list = ",".join(batch)
+            async with semaphore:
                 for attempt in range(MAX_RETRIES):
                     if should_stop and should_stop():
                         return
                     try:
+                        await rate_limiter.wait()
                         resp = await self._dex_client.get(
                             f"{DEXSCREENER_PAIRS_URL}/{ds_chain}/{addr_list}"
                         )
@@ -455,118 +532,69 @@ class UnifiedPipeline:
                         resp.raise_for_status()
                         pairs = resp.json() if isinstance(resp.json(), list) else []
 
-                        for p in pairs:
-                            base = p.get("baseToken", {})
-                            addr = base.get("address")
+                        for pair in pairs:
+                            addr = pair.get("baseToken", {}).get("address")
                             if not addr:
                                 continue
-
                             idx = addr_to_idx.get(addr)
-                            if idx is None:
-                                continue
-                            token = chain_tokens[idx]
-
-                            token["symbol"] = token.get("symbol") or base.get("symbol")
-                            token["name"] = base.get("name")
-                            token["dex_url"] = p.get("url")
-                            token["pair_address"] = p.get("pairAddress")
-                            token["dex_id"] = p.get("dexId")
-
-                            # Price
-                            price = float(p.get("priceUsd", 0) or 0)
-                            for w in ("5m", "1h", "6h", "24h"):
-                                token[f"price_{w}"] = price
-
-                            # Time-windowed metrics
-                            pc = p.get("priceChange", {})
-                            vol = p.get("volume", {})
-                            for w, wk in [("5m", "m5"), ("1h", "h1"), ("6h", "h6"), ("24h", "h24")]:
-                                txns = p.get("txns", {}).get(wk, {})
-                                token[f"price_change_{w}"] = pc.get(wk)
-                                token[f"volume_{w}"] = vol.get(wk)
-                                token[f"buys_{w}"] = txns.get("buys")
-                                token[f"sells_{w}"] = txns.get("sells")
-                                token[f"trades_{w}"] = (txns.get("buys") or 0) + (txns.get("sells") or 0)
-
-                            liq = p.get("liquidity", {})
-                            for w in ("5m", "1h", "6h", "24h"):
-                                token[f"liquidity_{w}"] = liq.get("usd")
-                            for w in ("5m", "1h", "6h", "24h"):
-                                token[f"market_cap_{w}"] = p.get("marketCap")
-
-                        break  # success
-
+                            if idx is not None:
+                                apply_pair(chain_tokens[idx], pair)
+                        break
                     except Exception as e:
                         logger.debug("DexScreener batch error (try %d): %s", attempt + 1, e)
                         if attempt < MAX_RETRIES - 1:
                             await asyncio.sleep(2)
                         else:
                             logger.warning("DexScreener batch failed after %d retries", MAX_RETRIES)
+            await report_checked(len(batch))
 
-                await asyncio.sleep(RATE_LIMIT_DELAY)
-                # Report progress after each batch
-                dex_checked += len(batch)
-                if progress_cb:
-                    progress_cb(f"DexScreener {dex_checked}/{dex_total}")
+        async def search_token(token: dict) -> None:
+            if should_stop and should_stop():
+                return
+            addr = token.get("token_address")
+            if not addr:
+                return
+            async with semaphore:
+                try:
+                    await rate_limiter.wait()
+                    resp = await self._dex_client.get(
+                        DEXSCREENER_SEARCH_URL, params={"q": addr}
+                    )
+                    if resp.status_code != 200:
+                        return
+                    data = resp.json()
+                    for pair in data.get("pairs", []):
+                        base = pair.get("baseToken", {})
+                        matched = base.get("address") == addr
+                        is_pair_addr = pair.get("pairAddress") == addr
+                        if not matched and not is_pair_addr:
+                            continue
+                        apply_pair(token, pair, addr=addr)
+                        if progress_cb:
+                            progress_cb(f"DexScreener {dex_checked}/{dex_total}")
+                        break
+                except Exception:
+                    pass
 
-            # Fallback: search API for tokens not found via batch endpoint
+        for ds_chain, chain_tokens in chain_groups.items():
+            if should_stop and should_stop():
+                return
+            addrs = [t["token_address"] for t in chain_tokens]
+            addr_to_idx = {addr: i for i, addr in enumerate(addrs)}
+            batch_tasks = [
+                fetch_batch(ds_chain, chain_tokens, addrs[i : i + BATCH_SIZE], addr_to_idx)
+                for i in range(0, len(addrs), BATCH_SIZE)
+            ]
+            if batch_tasks:
+                await asyncio.gather(*batch_tasks)
+
             unmatched = [t for t in chain_tokens if not t.get("pair_address")]
             if unmatched:
                 logger.debug("  Search-fallback for %d unmatched tokens on %s", len(unmatched), ds_chain)
-            for token in unmatched[:50]:  # limit search fallback to 50 per chain
-                if should_stop and should_stop():
-                    return
-                addr = token.get("token_address")
-                if not addr:
-                    continue
-                try:
-                    resp = await self._dex_client.get(
-                        f"{DEXSCREENER_SEARCH_URL}", params={"q": addr}
-                    )
-                    if resp.status_code != 200:
-                        continue
-                    data = resp.json()
-                    search_pairs = data.get("pairs", [])
-                    for p in search_pairs:
-                        base = p.get("baseToken", {})
-                        # Match: token address OR pair address (Telegram may catch pair URLs)
-                        matched = base.get("address") == addr
-                        is_pair_addr = p.get("pairAddress") == addr
-                        if not matched and not is_pair_addr:
-                            continue
-                        if is_pair_addr and not matched:
-                            # Our "token" is actually a pair address — use real token
-                            token["token_address"] = base.get("address")
-                            token["symbol"] = token.get("symbol") or base.get("symbol")
-                        else:
-                            token["symbol"] = token.get("symbol") or base.get("symbol")
-                        token["name"] = base.get("name")
-                        token["dex_url"] = p.get("url")
-                        token["pair_address"] = p.get("pairAddress")
-                        token["dex_id"] = p.get("dexId")
-                        price = float(p.get("priceUsd", 0) or 0)
-                        for w in ("5m", "1h", "6h", "24h"):
-                            token[f"price_{w}"] = price
-                        pc = p.get("priceChange", {})
-                        vol = p.get("volume", {})
-                        for w, wk in [("5m", "m5"), ("1h", "h1"), ("6h", "h6"), ("24h", "h24")]:
-                            txns = p.get("txns", {}).get(wk, {})
-                            token[f"price_change_{w}"] = pc.get(wk)
-                            token[f"volume_{w}"] = vol.get(wk)
-                            token[f"buys_{w}"] = txns.get("buys")
-                            token[f"sells_{w}"] = txns.get("sells")
-                            token[f"trades_{w}"] = (txns.get("buys") or 0) + (txns.get("sells") or 0)
-                        liq = p.get("liquidity", {})
-                        for w in ("5m", "1h", "6h", "24h"):
-                            token[f"liquidity_{w}"] = liq.get("usd")
-                        for w in ("5m", "1h", "6h", "24h"):
-                            token[f"market_cap_{w}"] = p.get("marketCap")
-                        if progress_cb:
-                            progress_cb(f"DexScreener {dex_checked}/{dex_total}")
-                        break  # first matching pair
-                    await asyncio.sleep(0.3)  # rate limit for search API
-                except Exception:
-                    pass
+                await asyncio.gather(*[
+                    search_token(token)
+                    for token in unmatched[:DEXSCREENER_SEARCH_FALLBACK_LIMIT_PER_CHAIN]
+                ])
 
     # ── Step 3: GMGN ───────────────────────────────────────────────────
 
@@ -1126,7 +1154,7 @@ class UnifiedPipeline:
                     "symbol": t.get("symbol"), "name": t.get("name"),
                     "dex_url": t.get("dex_url"), "pair_address": t.get("pair_address"),
                     "dex_id": t.get("dex_id"),
-                    "gmgn_score": t.get("gmgn_score"), "gmgn_hot_level": t.get("gmgn_hot_level"),
+                    "gmgn_score": None, "gmgn_hot_level": None,
                     "is_dexscreener_trending": t.get("is_dexscreener_trending", False),
                     "is_dexscreener_boosted": t.get("is_dexscreener_boosted", False),
                     "is_gmgn_trending": t.get("is_gmgn_trending", False),

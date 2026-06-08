@@ -9,7 +9,7 @@ import type { UnifiedTokenData, UnifiedWindowData } from '../api/client';
 const STEPS = [
   { key: 'telegram', label: 'Telegram Scan', desc: 'Scan groups for token mentions' },
   { key: 'trending', label: 'Trending Fetch', desc: 'DexScreener boosted + GMGN trending' },
-  { key: 'dexscreener', label: 'DexScreener + GMGN', desc: 'Parallel enrich: price/volume + GMGN metrics' },
+  { key: 'dexscreener', label: 'DexScreener', desc: 'Enrich price, volume, liquidity, and pair data' },
   { key: 'dedup', label: 'Deduplication', desc: 'Merge duplicate tokens' },
   { key: 'aggregate', label: 'Windowed Agg', desc: 'Compute 5m/1h/6h/24h buckets' },
   { key: 'persist', label: 'Persist', desc: 'Save to database' },
@@ -167,7 +167,7 @@ export default function Pipeline() {
               Pipeline
           </h1>
           <p className="text-sm mt-1 text-[#71717a]">
-            Trending → Telegram → DexScreener → GMGN → Dedup → Persist
+            Trending → Telegram → DexScreener → Dedup → Persist
             {isRunning && (
               <span className="ml-2 text-indigo-400 inline-flex items-center gap-1">
                 <Loader2 size={12} className="animate-spin" />Running...
