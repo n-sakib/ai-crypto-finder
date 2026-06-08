@@ -177,7 +177,7 @@ class TelegramDiscoveryAggregator:
             .limit(limit)
         ).subquery()
 
-        # Join with candidate tokens to get token details
+        # Join with candidate tokens to get token details (only enriched ones)
         query = (
             select(
                 CandidateToken,
@@ -188,6 +188,7 @@ class TelegramDiscoveryAggregator:
                 mention_agg.c.last_seen,
             )
             .join(mention_agg, CandidateToken.id == mention_agg.c.candidate_token_id)
+            .where(CandidateToken.pair_address.isnot(None))
             .order_by(
                 desc(mention_agg.c.group_count),
                 desc(mention_agg.c.mention_count),
@@ -231,7 +232,8 @@ class TelegramDiscoveryAggregator:
                 unique_user_count=row.unique_user_count,
                 group_count=row.group_count,
                 total_reactions=social_stats.get("total_reactions", 0),
-                total_views=social_stats.get("total_replies", 0),
+                total_replies=social_stats.get("total_replies", 0),
+                total_views=social_stats.get("total_views", 0),
                 total_forwards=social_stats.get("total_forwards", 0),
                 first_seen_in_window=row.first_seen,
                 last_seen_in_window=row.last_seen,

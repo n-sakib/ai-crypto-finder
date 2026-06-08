@@ -676,7 +676,9 @@ async def get_telegram_stats(session: AsyncSession = Depends(get_session)):
         CandidateToken, TelegramTokenMention, TelegramMessage,
     )
 
-    candidate_count = await session.execute(select(func.count(CandidateToken.id)))
+    candidate_count = await session.execute(
+        select(func.count(CandidateToken.id)).where(CandidateToken.pair_address.isnot(None))
+    )
     mention_count = await session.execute(select(func.count(TelegramTokenMention.id)))
     message_count = await session.execute(select(func.count(TelegramMessage.id)))
     source_count = await session.execute(

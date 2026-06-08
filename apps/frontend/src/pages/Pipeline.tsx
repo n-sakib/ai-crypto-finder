@@ -124,8 +124,8 @@ export default function Pipeline() {
     .sort((a, b) => {
       const wA = (a.windows[displayWindow as keyof typeof a.windows] ?? {}) as UnifiedWindowData;
       const wB = (b.windows[displayWindow as keyof typeof b.windows] ?? {}) as UnifiedWindowData;
-      const tgA = wA.telegram ?? { mentions: 0 };
-      const tgB = wB.telegram ?? { mentions: 0 };
+      const tgA = wA.telegram ?? { mentions: 0, replies: 0, users: 0, reactions: 0 };
+      const tgB = wB.telegram ?? { mentions: 0, replies: 0, users: 0, reactions: 0 };
 
       let valA: number = 0, valB: number = 0;
       switch (sortField) {
@@ -139,7 +139,10 @@ export default function Pipeline() {
         case 'liquidity': valA = wA.liquidity ?? 0; valB = wB.liquidity ?? 0; break;
         case 'mcap': valA = wA.market_cap ?? 0; valB = wB.market_cap ?? 0; break;
         case 'tg': valA = tgA.mentions; valB = tgB.mentions; break;
-        case 'groups': valA = a.group_count ?? 0; valB = b.group_count ?? 0; break;
+        case 'tg_replies': valA = tgA.replies ?? 0; valB = tgB.replies ?? 0; break;
+        case 'tg_users': valA = tgA.users ?? 0; valB = tgB.users ?? 0; break;
+        case 'tg_reactions': valA = tgA.reactions ?? 0; valB = tgB.reactions ?? 0; break;
+        case 'tg_groups': valA = tgA.groups ?? 0; valB = tgB.groups ?? 0; break;
         default: valA = a.rank; valB = b.rank;
       }
       return sortDir === 'asc' ? valA - valB : valB - valA;
@@ -154,7 +157,7 @@ export default function Pipeline() {
         <div>
           <h1 className="text-2xl font-bold flex items-center gap-3 text-[#e4e4e7]">
             <Activity size={24} className="text-indigo-400" />
-            Unified Pipeline
+              Pipeline
           </h1>
           <p className="text-sm mt-1 text-[#71717a]">
             Telegram → DexScreener → GMGN → Dedup → Persist
@@ -344,40 +347,38 @@ export default function Pipeline() {
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-[#1e1e2e] text-xs text-[#71717a]">
-                    <th className="text-left px-4 py-3 w-10 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('rank')}>
-                      #{sortIcon('rank')}
+                  <tr className="border-b border-[#1e1e2e] text-[10px] text-[#52525b] uppercase tracking-wider">
+                    <th className="text-left px-4 py-1" rowSpan={2}>#</th>
+                    <th className="text-left px-4 py-1" rowSpan={2}>Token</th>
+                    <th className="text-right px-4 py-1" rowSpan={2}>Price</th>
+                    <th className="text-right px-4 py-1" rowSpan={2}>Volume</th>
+                    <th className="text-right px-4 py-1" rowSpan={2}>Trades</th>
+                    <th className="text-right px-4 py-1" rowSpan={2}>Liq</th>
+                    <th className="text-right px-4 py-1" rowSpan={2}>MCap</th>
+                    <th className="text-center px-1 py-1 border-b border-[#27272a]" colSpan={5}>TG</th>
+                  </tr>
+                  <tr className="border-b border-[#1e1e2e] text-[11px] text-[#52525b]">
+                    <th className="text-right px-2 py-1 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('tg')}>
+                      Msg{sortIcon('tg')}
                     </th>
-                    <th className="text-left px-4 py-3 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('symbol')}>
-                      Token{sortIcon('symbol')}
+                    <th className="text-right px-2 py-1 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('tg_replies')}>
+                      💬{sortIcon('tg_replies')}
                     </th>
-                    <th className="text-right px-4 py-3 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('price')}>
-                      Price{sortIcon('price')}
+                    <th className="text-right px-2 py-1 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('tg_users')}>
+                      👤{sortIcon('tg_users')}
                     </th>
-                    <th className="text-right px-4 py-3 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('volume')}>
-                      Volume{sortIcon('volume')}
+                    <th className="text-right px-2 py-1 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('tg_reactions')}>
+                      👍{sortIcon('tg_reactions')}
                     </th>
-                    <th className="text-right px-4 py-3 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('trades')}>
-                      Trades{sortIcon('trades')}
-                    </th>
-                    <th className="text-right px-4 py-3 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('liquidity')}>
-                      Liquidity{sortIcon('liquidity')}
-                    </th>
-                    <th className="text-right px-4 py-3 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('mcap')}>
-                      MCap{sortIcon('mcap')}
-                    </th>
-                    <th className="text-right px-4 py-3 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('tg')}>
-                      TG{sortIcon('tg')}
-                    </th>
-                    <th className="text-right px-4 py-3 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('groups')}>
-                      Groups{sortIcon('groups')}
+                    <th className="text-right px-2 py-1 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('tg_groups')}>
+                      Grp{sortIcon('tg_groups')}
                     </th>
                   </tr>
                 </thead>
                 <tbody>
                   {pagedTokens.map((token: UnifiedTokenData) => {
                     const w = (token.windows[displayWindow as keyof typeof token.windows] ?? {}) as UnifiedWindowData;
-                    const tg = w.telegram ?? { mentions: 0, users: 0, groups: 0 };
+                    const tg = w.telegram ?? { mentions: 0, users: 0, groups: 0, replies: 0, reactions: 0 };
                     return (
                       <tr key={`${token.chain}:${token.token_address}`}
                         className="border-b border-[#1e1e2e] hover:bg-[#1a1a24] transition-colors">
@@ -406,18 +407,16 @@ export default function Pipeline() {
                         <td className="px-4 py-3 text-right font-mono text-[#71717a]">{formatCompact(w.trades)}</td>
                         <td className="px-4 py-3 text-right font-mono text-[#71717a]">${formatCompact(w.liquidity)}</td>
                         <td className="px-4 py-3 text-right font-mono text-[#71717a]">${formatCompact(w.market_cap)}</td>
-                        <td className="px-4 py-3 text-right font-mono">
-                          <span className="text-[#e4e4e7]">{tg.mentions}</span>
-                          <span className="text-[#52525b] ml-1">/ {tg.groups}g</span>
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono">
-                          <span className={`text-sm font-bold px-2 py-0.5 rounded ${
-                            token.group_count >= 5 ? 'bg-green-500/20 text-green-400' :
-                            token.group_count >= 2 ? 'bg-indigo-500/20 text-indigo-400' :
-                            'bg-[#1e1e2e] text-[#71717a]'
-                          }`}>
-                            {token.group_count ?? 0}
-                          </span>
+                        <td className="px-2 py-3 text-right font-mono text-[#e4e4e7] tabular-nums">{tg.mentions}</td>
+                        <td className="px-2 py-3 text-right font-mono text-[#71717a] tabular-nums">{tg.replies ?? 0}</td>
+                        <td className="px-2 py-3 text-right font-mono text-[#71717a] tabular-nums">{tg.users ?? 0}</td>
+                        <td className="px-2 py-3 text-right font-mono text-[#71717a] tabular-nums">{tg.reactions ?? 0}</td>
+                        <td className="px-2 py-3 text-right font-mono tabular-nums">
+                          <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${
+                            (tg.groups ?? 0) >= 5 ? 'bg-green-500/20 text-green-400' :
+                            (tg.groups ?? 0) >= 2 ? 'bg-indigo-500/20 text-indigo-400' :
+                            'text-[#71717a]'
+                          }`}>{tg.groups ?? 0}</span>
                         </td>
                       </tr>
                     );

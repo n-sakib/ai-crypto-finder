@@ -15,6 +15,19 @@ services:
     ports:
       - "6379:6379"
 
+  frontend:
+    build: ./apps/frontend
+    command: npm run dev -- --host
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_TARGET: http://web:8000
+    depends_on:
+      - web
+    volumes:
+      - ./apps/frontend:/app
+      - /app/node_modules
+
   web:
     build: ./apps/backend
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
@@ -26,6 +39,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+      WATCHFILES_FORCE_POLLING: "true"
     depends_on:
       - postgres
       - redis

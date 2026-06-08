@@ -59,6 +59,7 @@ class DiscoveryRankingItem(BaseModel):
     group_count: int
     # Social indicators
     total_reactions: int = 0
+    total_replies: int = 0
     total_views: int = 0
     total_forwards: int = 0
     first_seen_in_window: datetime

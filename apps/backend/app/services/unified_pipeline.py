@@ -49,6 +49,15 @@ class UnifiedPipeline:
         def _stop() -> bool:
             return should_stop and should_stop()
 
+        # ── Cleanup: remove old unenriched tokens from DB ─────────────
+        from sqlalchemy import delete as sqla_delete
+        result = await session.execute(
+            sqla_delete(UnifiedToken).where(UnifiedToken.pair_address.is_(None))
+        )
+        if result.rowcount:
+            logger.info("  Cleaned up %d unenriched tokens from previous runs", result.rowcount)
+            await session.commit()
+
         windows = (window,)  # single window
 
         # ── Step 1: Telegram Scan ─────────────────────────────────────
@@ -101,8 +110,13 @@ class UnifiedPipeline:
             status_callback("dedup", f"Deduplicating {total} tokens...", total, total)
         deduped = self._dedup(tg_tokens)
         logger.info("  %d tokens after dedup", len(deduped))
+
+        # ── Cleanup: remove unenriched tokens (no DexScreener pair found) ──
+        before_clean = len(deduped)
+        deduped = [t for t in deduped if t.get("pair_address")]
+        logger.info("  %d tokens after removing unenriched (removed %d)", len(deduped), before_clean - len(deduped))
         if status_callback:
-            status_callback("dedup", f"{len(deduped)} tokens after dedup", len(deduped), total)
+            status_callback("dedup", f"{len(deduped)} tokens (removed {before_clean - len(deduped)} unenriched)", len(deduped), total)
 
         # ── Step 4: Windowed Aggregation ───────────────────────────────
         logger.info("Step 4: Windowed aggregation (%s)...", window)
@@ -230,16 +244,28 @@ class UnifiedPipeline:
                             local_map[key][f"_w_{w}_mentions"] = 0
                             local_map[key][f"_w_{w}_users"] = set()
                             local_map[key][f"_w_{w}_groups"] = set()
+                            local_map[key][f"_w_{w}_reactions"] = 0
+                            local_map[key][f"_w_{w}_replies"] = 0
 
                     t = local_map[key]
                     t["all_groups"].add(source.name)
                     t["tg_mentions"] += 1
+
+                    # Per-message social stats
+                    reactions = getattr(msg, 'reactions', None)
+                    reactions_count = 0
+                    if reactions and hasattr(reactions, 'results') and reactions.results:
+                        reactions_count = sum(r.count for r in reactions.results)
+                    replies_count = getattr(msg, 'replies', None)
+                    replies_count = replies_count.replies if replies_count and hasattr(replies_count, 'replies') else 0
 
                     for w, delta in deltas.items():
                         if msg_ts >= now - delta:
                             t[f"_w_{w}_mentions"] += 1
                             t[f"_w_{w}_users"].add(sender_id)
                             t[f"_w_{w}_groups"].add(source.name)
+                            t[f"_w_{w}_reactions"] += reactions_count
+                            t[f"_w_{w}_replies"] += replies_count
 
             # Merge local map into shared merged_map
             for key, local_t in local_map.items():
@@ -251,6 +277,8 @@ class UnifiedPipeline:
                         mt[f"_w_{w}_mentions"] += local_t[f"_w_{w}_mentions"]
                         mt[f"_w_{w}_users"] |= local_t[f"_w_{w}_users"]
                         mt[f"_w_{w}_groups"] |= local_t[f"_w_{w}_groups"]
+                        mt[f"_w_{w}_reactions"] += local_t[f"_w_{w}_reactions"]
+                        mt[f"_w_{w}_replies"] += local_t[f"_w_{w}_replies"]
                 else:
                     merged_map[key] = local_t
 
@@ -274,6 +302,8 @@ class UnifiedPipeline:
                 t[f"tg_mentions_{w}"] = t.pop(f"_w_{w}_mentions")
                 t[f"tg_users_{w}"] = len(t.pop(f"_w_{w}_users"))
                 t[f"tg_groups_{w}"] = len(t.pop(f"_w_{w}_groups"))
+                t[f"tg_reactions_{w}"] = t.pop(f"_w_{w}_reactions")
+                t[f"tg_replies_{w}"] = t.pop(f"_w_{w}_replies")
             result_list.append(t)
 
         return result_list
@@ -535,6 +565,8 @@ class UnifiedPipeline:
                             existing[f"tg_mentions_{w}"] = (existing.get(f"tg_mentions_{w}", 0) + t.get(f"tg_mentions_{w}", 0))
                             existing[f"tg_users_{w}"] = max(existing.get(f"tg_users_{w}", 0), t.get(f"tg_users_{w}", 0))
                             existing[f"tg_groups_{w}"] = max(existing.get(f"tg_groups_{w}", 0), t.get(f"tg_groups_{w}", 0))
+                            existing[f"tg_reactions_{w}"] = (existing.get(f"tg_reactions_{w}", 0) + t.get(f"tg_reactions_{w}", 0))
+                            existing[f"tg_replies_{w}"] = (existing.get(f"tg_replies_{w}", 0) + t.get(f"tg_replies_{w}", 0))
                         existing["group_count"] = max(existing.get("group_count", 0), t.get("group_count", 0))
                         break
                 continue

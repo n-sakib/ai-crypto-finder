@@ -196,6 +196,7 @@ export interface TelegramDiscoveryToken {
   unique_user_count: number;
   group_count: number;
   total_reactions: number;
+  total_replies: number;
   total_views: number;
   total_forwards: number;
   first_seen_in_window: string;
