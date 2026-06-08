@@ -8,6 +8,7 @@ import type { UnifiedTokenData, UnifiedWindowData } from '../api/client';
 
 const STEPS = [
   { key: 'telegram', label: 'Telegram Scan', desc: 'Scan groups for token mentions' },
+  { key: 'trending', label: 'Trending Fetch', desc: 'DexScreener boosted + GMGN trending' },
   { key: 'dexscreener', label: 'DexScreener + GMGN', desc: 'Parallel enrich: price/volume + GMGN metrics' },
   { key: 'dedup', label: 'Deduplication', desc: 'Merge duplicate tokens' },
   { key: 'aggregate', label: 'Windowed Agg', desc: 'Compute 5m/1h/6h/24h buckets' },
@@ -57,6 +58,11 @@ export default function Pipeline() {
   const isDone = status?.status === 'done';
   const isError = status?.status === 'error';
   const currentStep = STEPS.findIndex(s => s.key === status?.step) ?? -1;
+  const progressLabel = status?.step === 'telegram'
+    ? 'sources'
+    : status?.step === 'dexscreener'
+      ? 'checked'
+      : 'tokens';
 
   const handleRefresh = async () => {
     flushSync(() => setRefreshing(true));
@@ -98,8 +104,6 @@ export default function Pipeline() {
   };
 
   const isRefreshing = refreshing || statusFetching || resultsFetching;
-  const hasData = results && results.tokens && results.tokens.length > 0;
-
   const tokens = results?.tokens ?? [];
   const totalTokens = results?.total ?? 0;
 
@@ -108,7 +112,7 @@ export default function Pipeline() {
       setSortDir(d => d === 'asc' ? 'desc' : 'asc');
     } else {
       setSortField(field);
-      setSortDir('desc');
+      setSortDir(['rank', 'dex_trending', 'gmgn_trending'].includes(field) ? 'asc' : 'desc');
     }
     setPage(0);
   };
@@ -124,10 +128,10 @@ export default function Pipeline() {
     .sort((a, b) => {
       const wA = (a.windows[displayWindow as keyof typeof a.windows] ?? {}) as UnifiedWindowData;
       const wB = (b.windows[displayWindow as keyof typeof b.windows] ?? {}) as UnifiedWindowData;
-      const tgA = wA.telegram ?? { mentions: 0, replies: 0, users: 0, reactions: 0 };
-      const tgB = wB.telegram ?? { mentions: 0, replies: 0, users: 0, reactions: 0 };
+      const tgA = wA.telegram ?? { mentions: 0, replies: 0, users: 0, reactions: 0, groups: 0 };
+      const tgB = wB.telegram ?? { mentions: 0, replies: 0, users: 0, reactions: 0, groups: 0 };
 
-      let valA: number = 0, valB: number = 0;
+      let valA: number, valB: number;
       switch (sortField) {
         case 'rank': valA = a.rank; valB = b.rank; break;
         case 'symbol': return sortDir === 'asc'
@@ -138,6 +142,9 @@ export default function Pipeline() {
         case 'trades': valA = wA.trades ?? 0; valB = wB.trades ?? 0; break;
         case 'liquidity': valA = wA.liquidity ?? 0; valB = wB.liquidity ?? 0; break;
         case 'mcap': valA = wA.market_cap ?? 0; valB = wB.market_cap ?? 0; break;
+        case 'dex_trending': valA = a.dexscreener_trending_rank ?? 9999; valB = b.dexscreener_trending_rank ?? 9999; break;
+        case 'dex_boosted': valA = a.dexscreener_boost_amount ?? 0; valB = b.dexscreener_boost_amount ?? 0; break;
+        case 'gmgn_trending': valA = a.gmgn_trending_rank ?? 9999; valB = b.gmgn_trending_rank ?? 9999; break;
         case 'tg': valA = tgA.mentions; valB = tgB.mentions; break;
         case 'tg_replies': valA = tgA.replies ?? 0; valB = tgB.replies ?? 0; break;
         case 'tg_users': valA = tgA.users ?? 0; valB = tgB.users ?? 0; break;
@@ -160,7 +167,7 @@ export default function Pipeline() {
               Pipeline
           </h1>
           <p className="text-sm mt-1 text-[#71717a]">
-            Telegram → DexScreener → GMGN → Dedup → Persist
+            Trending → Telegram → DexScreener → GMGN → Dedup → Persist
             {isRunning && (
               <span className="ml-2 text-indigo-400 inline-flex items-center gap-1">
                 <Loader2 size={12} className="animate-spin" />Running...
@@ -239,7 +246,7 @@ export default function Pipeline() {
               <div className="text-sm font-bold text-[#e4e4e7]">
                 {status?.tokens ?? 0}{status?.total ? ` / ${status.total}` : ''}
               </div>
-              <div className="text-[10px] text-[#52525b]">tokens</div>
+              <div className="text-[10px] text-[#52525b]">{progressLabel}</div>
             </div>
           </div>
           {/* Progress bar */}
@@ -344,34 +351,54 @@ export default function Pipeline() {
           </div>
 
           <div className="bg-[#13131a] border border-[#1e1e2e] rounded-xl overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+            <div className="overflow-hidden">
+              <table className="w-full table-fixed text-xs xl:text-sm">
+                <colgroup>
+                  <col className="w-[5%]" />
+                  <col className="w-[22%]" />
+                  <col className="w-[11%]" />
+                  <col className="w-[11%]" />
+                  <col className="w-[8%]" />
+                  <col className="w-[14%]" />
+                  <col className="w-[15%]" />
+                  <col className="w-[14%]" />
+                </colgroup>
                 <thead>
                   <tr className="border-b border-[#1e1e2e] text-[10px] text-[#52525b] uppercase tracking-wider">
-                    <th className="text-left px-4 py-1" rowSpan={2}>#</th>
-                    <th className="text-left px-4 py-1" rowSpan={2}>Token</th>
-                    <th className="text-right px-4 py-1" rowSpan={2}>Price</th>
-                    <th className="text-right px-4 py-1" rowSpan={2}>Volume</th>
-                    <th className="text-right px-4 py-1" rowSpan={2}>Trades</th>
-                    <th className="text-right px-4 py-1" rowSpan={2}>Liq</th>
-                    <th className="text-right px-4 py-1" rowSpan={2}>MCap</th>
-                    <th className="text-center px-1 py-1 border-b border-[#27272a]" colSpan={5}>TG</th>
-                  </tr>
-                  <tr className="border-b border-[#1e1e2e] text-[11px] text-[#52525b]">
-                    <th className="text-right px-2 py-1 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('tg')}>
-                      Msg{sortIcon('tg')}
+                    <th className="text-left px-2 py-2 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('rank')}>
+                      #{sortIcon('rank')}
                     </th>
-                    <th className="text-right px-2 py-1 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('tg_replies')}>
-                      💬{sortIcon('tg_replies')}
+                    <th className="text-left px-2 py-2 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('symbol')}>
+                      Token{sortIcon('symbol')}
                     </th>
-                    <th className="text-right px-2 py-1 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('tg_users')}>
-                      👤{sortIcon('tg_users')}
+                    <th className="text-right px-2 py-2 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('price')}>
+                      Price{sortIcon('price')}
                     </th>
-                    <th className="text-right px-2 py-1 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('tg_reactions')}>
-                      👍{sortIcon('tg_reactions')}
+                    <th className="text-right px-2 py-2 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('volume')}>
+                      Volume{sortIcon('volume')}
                     </th>
-                    <th className="text-right px-2 py-1 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('tg_groups')}>
-                      Grp{sortIcon('tg_groups')}
+                    <th className="text-right px-2 py-2 cursor-pointer hover:text-[#e4e4e7] select-none" onClick={() => handleSort('trades')}>
+                      Trades{sortIcon('trades')}
+                    </th>
+                    <th className="text-right px-2 py-2">
+                      <div className="flex flex-wrap justify-end gap-x-2 gap-y-1">
+                        <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('liquidity')}>Liq{sortIcon('liquidity')}</button>
+                        <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('mcap')}>MC{sortIcon('mcap')}</button>
+                      </div>
+                    </th>
+                    <th className="text-right px-2 py-2">
+                      <div className="flex flex-wrap justify-end gap-x-2 gap-y-1">
+                        <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('dex_trending')} title="DexScreener Trending Rank">DTr{sortIcon('dex_trending')}</button>
+                        <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('dex_boosted')} title="DexScreener Boost Amount">DBo{sortIcon('dex_boosted')}</button>
+                        <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('gmgn_trending')} title="GMGN Trending Rank">GRk{sortIcon('gmgn_trending')}</button>
+                      </div>
+                    </th>
+                    <th className="text-right px-2 py-2">
+                      <div className="flex flex-wrap justify-end gap-x-2 gap-y-1">
+                        <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('tg')}>Msg{sortIcon('tg')}</button>
+                        <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('tg_users')}>Usr{sortIcon('tg_users')}</button>
+                        <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('tg_groups')}>Grp{sortIcon('tg_groups')}</button>
+                      </div>
                     </th>
                   </tr>
                 </thead>
@@ -382,18 +409,18 @@ export default function Pipeline() {
                     return (
                       <tr key={`${token.chain}:${token.token_address}`}
                         className="border-b border-[#1e1e2e] hover:bg-[#1a1a24] transition-colors">
-                        <td className="px-4 py-3">
+                        <td className="px-2 py-3">
                           <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${
                             token.rank <= 3 ? 'bg-yellow-500/20 text-yellow-400' :
                             token.rank <= 10 ? 'bg-indigo-500/20 text-indigo-400' :
                             'text-[#71717a]'
                           }`}>{token.rank}</span>
                         </td>
-                        <td className="px-4 py-3">
-                          <div className="font-semibold text-[#e4e4e7]">
+                        <td className="px-2 py-3 min-w-0">
+                          <div className="font-semibold text-[#e4e4e7] truncate">
                             {token.symbol || token.token_address.slice(0, 8)}
                           </div>
-                          <div className="text-xs text-[#52525b]">
+                          <div className="text-[10px] xl:text-xs text-[#52525b] truncate">
                             {token.chain}
                             {token.dex_url && (
                               <a href={token.dex_url} target="_blank" rel="noopener noreferrer" className="ml-1 inline-flex text-indigo-400 hover:text-indigo-300">
@@ -402,21 +429,38 @@ export default function Pipeline() {
                             )}
                           </div>
                         </td>
-                        <td className="px-4 py-3 text-right font-mono text-[#e4e4e7]">${formatCompact(w.price)}</td>
-                        <td className="px-4 py-3 text-right font-mono text-[#e4e4e7]">${formatCompact(w.volume)}</td>
-                        <td className="px-4 py-3 text-right font-mono text-[#71717a]">{formatCompact(w.trades)}</td>
-                        <td className="px-4 py-3 text-right font-mono text-[#71717a]">${formatCompact(w.liquidity)}</td>
-                        <td className="px-4 py-3 text-right font-mono text-[#71717a]">${formatCompact(w.market_cap)}</td>
-                        <td className="px-2 py-3 text-right font-mono text-[#e4e4e7] tabular-nums">{tg.mentions}</td>
-                        <td className="px-2 py-3 text-right font-mono text-[#71717a] tabular-nums">{tg.replies ?? 0}</td>
-                        <td className="px-2 py-3 text-right font-mono text-[#71717a] tabular-nums">{tg.users ?? 0}</td>
-                        <td className="px-2 py-3 text-right font-mono text-[#71717a] tabular-nums">{tg.reactions ?? 0}</td>
+                        <td className="px-2 py-3 text-right font-mono text-[#e4e4e7] truncate">${formatCompact(w.price)}</td>
+                        <td className="px-2 py-3 text-right font-mono text-[#e4e4e7] truncate">${formatCompact(w.volume)}</td>
+                        <td className="px-2 py-3 text-right font-mono text-[#71717a] truncate">{formatCompact(w.trades)}</td>
+                        <td className="px-2 py-3 text-right font-mono text-[#71717a] tabular-nums">
+                          <div className="truncate">${formatCompact(w.liquidity)}</div>
+                          <div className="text-[10px] text-[#52525b] truncate">${formatCompact(w.market_cap)}</div>
+                        </td>
                         <td className="px-2 py-3 text-right font-mono tabular-nums">
-                          <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${
-                            (tg.groups ?? 0) >= 5 ? 'bg-green-500/20 text-green-400' :
-                            (tg.groups ?? 0) >= 2 ? 'bg-indigo-500/20 text-indigo-400' :
-                            'text-[#71717a]'
-                          }`}>{tg.groups ?? 0}</span>
+                          <div className="flex flex-wrap justify-end gap-x-2 gap-y-1">
+                            <span className={token.is_dexscreener_trending ? 'text-green-400' : 'text-[#3f3f46]'} title="DexScreener Trending Rank">
+                              D{token.dexscreener_trending_rank ?? '—'}
+                            </span>
+                            <span className={token.is_dexscreener_boosted ? 'text-amber-400' : 'text-[#3f3f46]'} title="DexScreener Boost Amount">
+                              B{formatCompact(token.dexscreener_boost_amount)}
+                            </span>
+                            <span className={token.is_gmgn_trending ? 'text-purple-400' : 'text-[#3f3f46]'} title="GMGN Trending Rank">
+                              G{token.gmgn_trending_rank ?? '—'}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="px-2 py-3 text-right font-mono tabular-nums">
+                          <div className="flex flex-wrap justify-end gap-x-2 gap-y-1">
+                            <span className="text-[#e4e4e7]" title="Mentions">M{tg.mentions}</span>
+                            <span className="text-[#71717a]" title="Replies">R{tg.replies ?? 0}</span>
+                            <span className="text-[#71717a]" title="Users">U{tg.users ?? 0}</span>
+                            <span className="text-[#71717a]" title="Reactions">Re{tg.reactions ?? 0}</span>
+                            <span className={`${
+                              (tg.groups ?? 0) >= 5 ? 'text-green-400' :
+                              (tg.groups ?? 0) >= 2 ? 'text-indigo-400' :
+                              'text-[#71717a]'
+                            }`} title="Groups">G{tg.groups ?? 0}</span>
+                          </div>
                         </td>
                       </tr>
                     );

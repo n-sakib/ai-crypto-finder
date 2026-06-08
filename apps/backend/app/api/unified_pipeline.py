@@ -56,13 +56,18 @@ async def run_pipeline(window: str = Query("24h", description="Time window: 5m, 
         async with _PIPELINE_LOCK:
             from app.core.database import async_session_factory
 
-            def update_step(step: str, detail: str = "", tokens: int = 0, total: int = 0):
+            def update_step(step: str, detail: str = "", tokens: int | None = None, total: int | None = None):
+                previous_step = _pipeline_status.get("step")
                 _pipeline_status["step"] = step
                 _pipeline_status["detail"] = detail
-                if tokens:
+                if tokens is not None:
                     _pipeline_status["tokens"] = tokens
-                if total:
+                elif previous_step != step:
+                    _pipeline_status["tokens"] = 0
+                if total is not None:
                     _pipeline_status["total"] = total
+                elif previous_step != step:
+                    _pipeline_status.pop("total", None)
 
             async with async_session_factory() as session:
                 try:
@@ -127,6 +132,13 @@ async def get_pipeline_results(
                 "symbol": t.symbol, "name": t.name,
                 "dex_url": t.dex_url, "pair_address": t.pair_address,
                 "gmgn_score": t.gmgn_score, "gmgn_hot_level": t.gmgn_hot_level,
+                "is_dexscreener_trending": t.is_dexscreener_trending or False,
+                "is_dexscreener_boosted": t.is_dexscreener_boosted or False,
+                "is_gmgn_trending": t.is_gmgn_trending or False,
+                "dexscreener_trending_rank": t.dexscreener_trending_rank,
+                "dexscreener_boost_amount": t.dexscreener_boost_amount,
+                "dexscreener_boost_total": t.dexscreener_boost_total,
+                "gmgn_trending_rank": t.gmgn_trending_rank,
                 "composite_score": t.composite_score,
                 "source_groups": t.source_groups or [],
                 "group_count": t.group_count or 0,

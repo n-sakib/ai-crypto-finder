@@ -109,6 +109,13 @@ export interface UnifiedTokenData {
   dex_id?: string;
   gmgn_score?: number;
   gmgn_hot_level?: number;
+  is_dexscreener_trending?: boolean;
+  is_dexscreener_boosted?: boolean;
+  is_gmgn_trending?: boolean;
+  dexscreener_trending_rank?: number | null;
+  dexscreener_boost_amount?: number | null;
+  dexscreener_boost_total?: number | null;
+  gmgn_trending_rank?: number | null;
   windows: {
     '5m'?: UnifiedWindowData;
     '1h'?: UnifiedWindowData;

@@ -452,6 +452,15 @@ class UnifiedToken(Base):
     tg_reactions_24h = Column(Integer, default=0)
     tg_replies_24h = Column(Integer, default=0)
 
+    # Discovery source flags
+    is_dexscreener_trending = Column(Boolean, default=False)
+    is_gmgn_trending = Column(Boolean, default=False)
+    is_dexscreener_boosted = Column(Boolean, default=False)
+    dexscreener_trending_rank = Column(Integer, nullable=True)
+    dexscreener_boost_amount = Column(Float, nullable=True)
+    dexscreener_boost_total = Column(Float, nullable=True)
+    gmgn_trending_rank = Column(Integer, nullable=True)
+
     # Ranking
     composite_score = Column(Float, nullable=True)
     rank = Column(Integer, nullable=True)
