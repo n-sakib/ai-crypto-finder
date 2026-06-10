@@ -75,11 +75,19 @@ class TelegramDiscoveryAggregator:
         self,
         min_mention_count: int | None = None,
         min_group_count: int = 1,
-        min_unique_user_count: int = 1,
+        min_unique_user_count: int | None = None,
     ):
         self.min_mention_count = min_mention_count if min_mention_count is not None else settings.MIN_MENTIONS
         self.min_group_count = min_group_count
-        self.min_unique_user_count = min_unique_user_count
+        self.min_unique_user_count = (
+            min_unique_user_count
+            if min_unique_user_count is not None
+            else settings.MIN_UNIQUE_USERS
+        )
+
+    @property
+    def min_unique_users(self) -> int:
+        return self.min_unique_user_count
 
     async def rank(
         self,

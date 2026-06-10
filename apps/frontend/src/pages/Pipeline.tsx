@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { flushSync } from 'react-dom';
-import { Play, RefreshCw, CheckCircle, Loader2, Activity, Layers, TrendingUp, Users, BarChart3, ExternalLink, ChevronDown, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
+import { Play, RefreshCw, CheckCircle, Loader2, Activity, Layers, TrendingUp, Users, Target, ExternalLink, ChevronDown, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { usePipelineStatus, usePipelineResults, useTriggerPipeline } from '../hooks/useApi';
 import { api } from '../api/client';
@@ -107,6 +107,13 @@ export default function Pipeline() {
   const isRefreshing = refreshing || statusFetching || resultsFetching;
   const tokens = results?.tokens ?? [];
   const totalTokens = results?.total ?? 0;
+  const highestWalletMatch = tokens.reduce<UnifiedTokenData | null>((best, token) => {
+    if (!best) return token;
+    return (token.gmgn_kol_count ?? 0) > (best.gmgn_kol_count ?? 0) ? token : best;
+  }, null);
+  const highestWalletMatchName = highestWalletMatch && (highestWalletMatch.gmgn_kol_count ?? 0) > 0
+    ? highestWalletMatch.name || highestWalletMatch.symbol || highestWalletMatch.token_address.slice(0, 8)
+    : '—';
 
   const handleSort = (field: string) => {
     if (sortField === field) {
@@ -288,7 +295,7 @@ export default function Pipeline() {
           <div className="grid grid-cols-3 gap-3 mb-4 shrink-0">
             {[
               { icon: TrendingUp, color: 'indigo', label: 'Total Tokens Found', value: isRefreshing ? '—' : totalTokens },
-              { icon: BarChart3, color: 'purple', label: 'Total Volume', value: isRefreshing ? '—' : formatCompact(tokens.reduce((sum, t) => sum + (t.windows[displayWindow as keyof typeof t.windows]?.volume ?? 0), 0)) },
+              { icon: Target, color: 'purple', label: 'Highest Wallet Match', value: isRefreshing ? '—' : highestWalletMatchName },
               { icon: Users, color: 'green', label: 'Total Trades', value: isRefreshing ? '—' : tokens.reduce((sum, t) => sum + (t.windows[displayWindow as keyof typeof t.windows]?.trades ?? 0), 0) },
             ].map((s) => (
               <div key={s.label} className={`bg-[#13131a] border border-[#1e1e2e] rounded-xl p-4 flex items-center gap-3 ${isRefreshing ? 'opacity-40' : ''}`}>
@@ -301,7 +308,7 @@ export default function Pipeline() {
                 </div>
                 <div>
                   <div className="text-xs text-[#71717a]">{s.label}</div>
-                  <div className="text-lg font-bold text-[#e4e4e7]">{s.value}</div>
+                  <div className="text-lg font-bold text-[#e4e4e7] truncate max-w-[12rem]" title={String(s.value)}>{s.value}</div>
                 </div>
               </div>
             ))}

@@ -31,11 +31,11 @@ logger = logging.getLogger(__name__)
 
 # EVM address: 0x followed by exactly 40 hex characters
 # Uses lookbehind/lookahead to also match addresses in URLs (after / or -)
-EVM_ADDRESS_RE = re.compile(r"(?:^|[^a-zA-Z0-9])(0x[a-fA-F0-9]{40})(?:$|[^a-zA-Z0-9])")
+EVM_ADDRESS_RE = re.compile(r"(?<![a-zA-Z0-9])(0x[a-fA-F0-9]{40})(?![a-zA-Z0-9])")
 
 # Solana-style address: base58 string, 32-44 chars
 # Uses non-word-boundary matching to capture addresses in URLs (/solana/ADDR, SOL-ADDR)
-SOLANA_ADDRESS_RE = re.compile(r"(?:^|[^a-zA-Z0-9])([1-9A-HJ-NP-Za-km-z]{32,44})(?:$|[^a-zA-Z0-9])")
+SOLANA_ADDRESS_RE = re.compile(r"(?<![a-zA-Z0-9])([1-9A-HJ-NP-Za-km-z]{32,44})(?![a-zA-Z0-9])")
 
 # Cashtags: $ followed by 2-15 uppercase/lowercase alphanumeric chars
 CASHTAG_RE = re.compile(r"\$([A-Za-z]{2,15})\b")

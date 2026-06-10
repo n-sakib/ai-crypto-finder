@@ -136,9 +136,13 @@ class UnifiedPipeline:
         logger.info("  Found %d trending tokens (DexScreener + GMGN)", len(trending_tokens))
 
         # Merge trending tokens into tg_tokens (update flags on existing, add new)
-        tg_map: dict[str, dict] = {f"{t.get('chain')}:{t.get('token_address')}": t for t in tg_tokens}
+        tg_map: dict[str, dict] = {
+            key: t for t in tg_tokens if (key := self._dedup_key(t)) is not None
+        }
         for tt in trending_tokens:
-            key = f"{tt.get('chain')}:{tt.get('token_address')}"
+            key = self._dedup_key(tt)
+            if key is None:
+                continue
             if key in tg_map:
                 # Update flags on existing token
                 existing = tg_map[key]
@@ -865,6 +869,10 @@ class UnifiedPipeline:
         result = []
         for t in tokens:
             key = self._dedup_key(t)
+            if key is None:
+                result.append(t)
+                continue
+            self._canonicalize_token_identity(t)
             if key in seen:
                 for existing in result:
                     ek = self._dedup_key(existing)
@@ -877,13 +885,46 @@ class UnifiedPipeline:
         return result
 
     @staticmethod
-    def _dedup_key(token: dict) -> str:
-        chain = token.get("chain") or "solana"
-        if chain == "sol":
-            chain = "solana"
-        elif chain == "eth":
-            chain = "ethereum"
-        return f"{chain}:{token.get('token_address') or ''}"
+    def _dedup_key(token: dict) -> str | None:
+        chain, address = UnifiedPipeline._normalized_identity(token)
+        if not address:
+            return None
+        return f"{chain}:{address}"
+
+    @staticmethod
+    def _normalized_identity(token: dict) -> tuple[str, str | None]:
+        chain = UnifiedPipeline._normalize_chain(token.get("chain") or "solana")
+        address = token.get("token_address")
+        if not address:
+            return chain, None
+        address = str(address).strip()
+        if not address:
+            return chain, None
+        if address.startswith("0x"):
+            address = address.lower()
+        return chain, address
+
+    @staticmethod
+    def _normalize_chain(chain: str) -> str:
+        aliases = {
+            "sol": "solana",
+            "eth": "ethereum",
+            "bnb": "bsc",
+            "matic": "polygon",
+            "arb": "arbitrum",
+            "op": "optimism",
+            "avax": "avalanche",
+            "ftm": "fantom",
+        }
+        chain = str(chain or "solana").strip().lower()
+        return aliases.get(chain, chain)
+
+    @staticmethod
+    def _canonicalize_token_identity(token: dict) -> None:
+        chain, address = UnifiedPipeline._normalized_identity(token)
+        token["chain"] = chain
+        if address:
+            token["token_address"] = address
 
     @staticmethod
     def _merge_list_field(existing: dict, field: str, values: list) -> None:
@@ -1335,6 +1376,7 @@ class UnifiedPipeline:
         saved = 0
         with session.no_autoflush:
             for t in tokens:
+                self._canonicalize_token_identity(t)
                 addr = t.get("token_address")
                 chain = t.get("chain", "solana")
                 if not addr:

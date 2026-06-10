@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     TELEGRAM_CHAIN_FOCUS: str = "solana,base,ethereum,bsc"
     # Discovery thresholds
     MIN_MENTIONS: int = 5
+    MIN_UNIQUE_USERS: int = 3
     TOP_DISCOVERY_LIMIT: int = 100
     DISCOVERY_WINDOW_MINUTES: int = 60
     # Store raw message text (off by default for privacy)
