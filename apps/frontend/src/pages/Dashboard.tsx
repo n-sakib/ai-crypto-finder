@@ -42,16 +42,16 @@ export default function Dashboard() {
   }));
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-6">
-      <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+    <div className="px-2 py-3 h-full flex flex-col">
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2 shrink-0">
         <div>
-          <h1 className="text-2xl font-bold text-[#e4e4e7]">Token Rankings</h1>
-          <p className="text-sm mt-1 text-[#71717a]">{rankings?.total_candidates||0} candidates</p>
+          <h1 className="text-xl font-bold text-[#e4e4e7]">Token Rankings</h1>
+          <p className="text-sm mt-0.5 text-[#71717a]">{rankings?.total_candidates||0} candidates</p>
         </div>
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4 shrink-0">
         <StatCard icon={TrendingUp} label="Tier A" value={stats?.tier_a_count ?? rankings?.tier_a?.length ?? 0} color="text-green-500" bg="bg-green-500/10"/>
         <StatCard icon={Shield} label="Tier B" value={stats?.tier_b_count ?? rankings?.tier_b?.length ?? 0} color="text-indigo-400" bg="bg-indigo-500/10"/>
         <StatCard icon={Wallet} label="Total Ranked" value={stats?.tokens_ranked ?? rankings?.total_candidates ?? 0} color="text-yellow-500" bg="bg-yellow-500/10"/>
@@ -59,7 +59,7 @@ export default function Dashboard() {
       </div>
 
       {/* Charts Row */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-4 shrink-0">
         {/* Pie Chart — Tier Distribution */}
         <div className="bg-[#13131a] border border-[#1e1e2e] rounded-xl p-5">
           <h2 className="text-sm font-semibold mb-4 flex items-center gap-2 text-[#e4e4e7]">
@@ -67,11 +67,11 @@ export default function Dashboard() {
             <InfoTooltip text="Tokens are ranked into tiers based on momentum and risk. Tier A = immediate review (high momentum + low risk), Tier B = watch closely, Tier C = early signs needing confirmation, Excluded = high momentum but critical risk." />
           </h2>
           {pieData.length === 0 ? (
-            <div className="flex items-center justify-center h-48 text-sm text-[#71717a]">No data yet</div>
+            <div className="flex items-center justify-center h-40 text-sm text-[#71717a]">No data yet</div>
           ) : (
-            <ResponsiveContainer width="100%" height={240}>
+            <ResponsiveContainer width="100%" height={200}>
               <RePie>
-                <Pie data={pieData} cx="50%" cy="50%" innerRadius={60} outerRadius={90} paddingAngle={4} dataKey="value">
+                <Pie data={pieData} cx="50%" cy="50%" innerRadius={50} outerRadius={80} paddingAngle={4} dataKey="value">
                   {pieData.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} stroke="transparent"/>)}
                 </Pie>
                 <Tooltip contentStyle={{ background: '#13131a', border: '1px solid #1e1e2e', borderRadius: 8, color: '#e4e4e7' }}/>
@@ -88,41 +88,41 @@ export default function Dashboard() {
             <InfoTooltip text="Early Momentum Score combines attention, market flow, adoption, liquidity, smart money, narrative, and price compression into a single 0–100 rating. Higher = stronger early opportunity signal." />
           </h2>
           {barData.length === 0 ? (
-            <div className="flex items-center justify-center h-48 text-sm text-[#71717a]">No data yet</div>
+            <div className="flex items-center justify-center h-40 text-sm text-[#71717a]">No data yet</div>
           ) : (
-            <div className="overflow-y-auto" style={{ maxHeight: 400 }}>
-              <ResponsiveContainer width="100%" height={Math.max(barData.length * 32, 280)}>
+            <ResponsiveContainer width="100%" height={Math.max(barData.length * 32, 220)}>
               <BarChart data={barData} layout="vertical" margin={{ top: 4, right: 30, left: 10, bottom: 4 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#1e1e2e" horizontal={false}/>
                 <XAxis type="number" domain={[0, 100]} tick={{ fill: '#71717a', fontSize: 11 }} axisLine={false} tickLine={false} tickCount={5}/>
                 <YAxis type="category" dataKey="name" tick={{ fill: '#e4e4e7', fontSize: 13, fontWeight: 700 }} axisLine={false} tickLine={false} width={55}/>
                 <Tooltip cursor={{ fill: 'rgba(99,102,241,0.08)' }}
                   contentStyle={{ background: '#13131a', border: '1px solid #1e1e2e', borderRadius: 10, color: '#e4e4e7', fontSize: 13, fontWeight: 600 }}/>
-                <Bar dataKey="score" radius={0} maxBarSize={24} barSize={18} fill="#6366f1">
-                  {barData.length <= 15 && <LabelList dataKey="score" position="right" fill="#e4e4e7" fontSize={12} fontWeight={700}/>}
+                <Bar dataKey="score" radius={0} maxBarSize={22} barSize={16} fill="#6366f1">
+                  {barData.length <= 12 && <LabelList dataKey="score" position="right" fill="#e4e4e7" fontSize={12} fontWeight={700}/>}
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
-            </div>
           )}
         </div>
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 mb-4 p-1 rounded-xl bg-[#13131a] border border-[#1e1e2e]">
-        {TABS.map(t=>(<button key={t.key} onClick={()=>setTab(t.key)} className={`flex-1 px-3 py-2.5 rounded-lg text-xs font-semibold transition-all ${tab===t.key?`${t.bg} ${t.color} ${t.border} border`:'text-[#71717a] border border-transparent'}`}><div>{t.label}</div><div className="text-[10px] opacity-60">{t.desc}</div></button>))}
+      <div className="flex gap-1.5 mb-3 p-1 rounded-xl bg-[#13131a] border border-[#1e1e2e] shrink-0">
+        {TABS.map(t=>(<button key={t.key} onClick={()=>setTab(t.key)} className={`flex-1 px-3 py-2 rounded-lg text-xs font-semibold transition-all ${tab===t.key?`${t.bg} ${t.color} ${t.border} border`:'text-[#71717a] border border-transparent'}`}><div>{t.label}</div><div className="text-[10px] opacity-60">{t.desc}</div></button>))}
       </div>
 
-      {/* Token List */}
-      {tokens.length === 0 ? (
-        <div className="bg-[#13131a] border border-[#1e1e2e] rounded-xl p-12 text-center">
-          <Wallet size={48} className="mx-auto mb-3 text-[#71717a]"/>
-          <p className="text-lg font-medium text-[#e4e4e7]">No tokens in this tier</p>
-          <p className="text-sm mt-1 text-[#71717a]">Run the pipeline from the Pipeline page to discover tokens</p>
-        </div>
-      ) : (
-        <div className="flex flex-col gap-2">{tokens.map(t=><TokenRow key={t.id} token={t}/>)}</div>
-      )}
+      {/* Token List — scrollable */}
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        {tokens.length === 0 ? (
+          <div className="bg-[#13131a] border border-[#1e1e2e] rounded-xl p-12 text-center">
+            <Wallet size={48} className="mx-auto mb-3 text-[#71717a]"/>
+            <p className="text-lg font-medium text-[#e4e4e7]">No tokens in this tier</p>
+            <p className="text-sm mt-1 text-[#71717a]">Run the pipeline from the Pipeline page to discover tokens</p>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2 pb-1">{tokens.map(t=><TokenRow key={t.id} token={t}/>)}</div>
+        )}
+      </div>
     </div>
   );
 }

@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -15,6 +17,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 GMGN_BASE_URL = "https://gmgn.ai"
+GMGN_OPENAPI_BASE_URL = "https://openapi.gmgn.ai"
 GMGN_TRENDING_URL = f"{GMGN_BASE_URL}/defi/router/v1/sol/txns/trending"
 GMGN_NEW_PAIRS_URL = f"{GMGN_BASE_URL}/defi/router/v1/sol/new_pairs"
 GMGN_TOKEN_INFO_URL = f"{GMGN_BASE_URL}/defi/router/v1/sol/token_info"
@@ -92,6 +95,45 @@ class GMGNClient:
             return []
         except Exception as e:
             logger.error("Failed to fetch GMGN new pairs: %s", e)
+            return []
+
+    async def fetch_kol_trades(self, chain: str = "sol", limit: int = 200) -> list[dict]:
+        """Fetch GMGN renowned/KOL trade feed from the authenticated OpenAPI route."""
+        if not settings.GMGN_API_KEY:
+            raise RuntimeError("GMGN_API_KEY is not configured")
+
+        params = {
+            "chain": chain,
+            "limit": max(1, min(limit, 200)),
+            "timestamp": int(time.time()),
+            "client_id": str(uuid.uuid4()),
+        }
+        headers = {
+            "X-APIKEY": settings.GMGN_API_KEY,
+            "Accept": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+            resp = await client.get(f"{GMGN_OPENAPI_BASE_URL}/v1/user/kol", params=params, headers=headers)
+            if resp.status_code == 429:
+                reset = resp.headers.get("X-RateLimit-Reset")
+                raise httpx.HTTPStatusError(
+                    f"GMGN rate limit exceeded; retry after {reset or 'reset window'}",
+                    request=resp.request,
+                    response=resp,
+                )
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("code") not in (0, None):
+                logger.warning("GMGN KOL API returned code=%s msg=%s", data.get("code"), data.get("msg"))
+                return []
+            payload = data.get("data", data)
+            if isinstance(payload, dict):
+                for key in ("list", "trades", "items", "data"):
+                    value = payload.get(key)
+                    if isinstance(value, list):
+                        return value
+            if isinstance(payload, list):
+                return payload
             return []
 
     @staticmethod

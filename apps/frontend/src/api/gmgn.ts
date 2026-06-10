@@ -40,3 +40,46 @@ export interface GMGNStats {
   latest_token_at: string | null;
   generated_at: string;
 }
+
+export interface GMGNKOLWallet {
+  maker: string;
+  twitter_username: string | null;
+  twitter_name: string | null;
+  tags: string[];
+  amount_usd: number;
+  buy_count: number;
+  last_buy_at: string;
+}
+
+export interface GMGNKOLTrade {
+  transaction_hash: string | null;
+  maker: string;
+  twitter_username: string | null;
+  twitter_name: string | null;
+  amount_usd: number;
+  price_usd: number | null;
+  bought_at: string;
+}
+
+export interface GMGNKOLCluster {
+  token_address: string;
+  symbol: string | null;
+  name: string | null;
+  logo: string | null;
+  launchpad: string | null;
+  kol_count: number;
+  buy_count: number;
+  total_amount_usd: number;
+  last_buy_at: string;
+  kol_wallets: GMGNKOLWallet[];
+  trades: GMGNKOLTrade[];
+}
+
+export interface GMGNKOLClustersResponse {
+  chain: string;
+  window: string;
+  generated_at: string;
+  total_trades: number;
+  total_buy_trades: number;
+  clusters: GMGNKOLCluster[];
+}

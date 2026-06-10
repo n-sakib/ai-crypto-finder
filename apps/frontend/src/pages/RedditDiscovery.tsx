@@ -196,10 +196,10 @@ export default function RedditDiscovery() {
     : null;
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-6">
-      <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+    <div className="px-2 py-3">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <div>
-          <h1 className="text-2xl font-bold text-[#e4e4e7] flex items-center gap-2">
+          <h1 className="text-lg font-bold text-[#e4e4e7] flex items-center gap-2">
             <MessageCircle size={24} className="text-orange-400" />
             Reddit Discovery
           </h1>

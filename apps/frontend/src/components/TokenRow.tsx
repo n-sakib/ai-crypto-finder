@@ -6,7 +6,7 @@ import type { TokenSummary } from '../api/client';
 export default function TokenRow({ token }: { token: TokenSummary }) {
   const up = token.price_change_24h >= 0;
   return (
-    <Link to={`/token/${token.id}`} className="bg-[#13131a] border border-[#1e1e2e] rounded-xl p-4 flex items-center gap-4 no-underline hover:border-indigo-500/30 transition-all group">
+    <Link to={`/token/${token.id}`} className="bg-[#13131a] border border-[#1e1e2e] rounded-lg px-4 py-3 flex items-center gap-4 no-underline hover:border-indigo-500/30 transition-all group">
       <div className="w-8 text-center">
         {token.rank_position ? <span className="text-sm font-bold text-[#71717a]">#{token.rank_position}</span> : <span className="text-sm text-[#71717a]">—</span>}
       </div>

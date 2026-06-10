@@ -204,11 +204,11 @@ export default function TwitterDiscovery() {
     : null;
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-6 space-y-6">
+    <div className="px-2 py-3 space-y-4">
       {/* ── Header ──────────────────────────────────────────── */}
-      <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <div>
-          <h1 className="text-2xl font-bold text-[#e4e4e7] flex items-center gap-2">
+          <h1 className="text-lg font-bold text-[#e4e4e7] flex items-center gap-2">
             <TrendingUp size={24} className="text-blue-400" />
             Twitter/X Discovery
           </h1>

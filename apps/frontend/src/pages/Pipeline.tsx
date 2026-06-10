@@ -159,14 +159,14 @@ export default function Pipeline() {
   const pagedTokens = displayTokens.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
   return (
-    <div className="max-w-7xl mx-auto px-4 py-6">
-      <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+    <div className="px-2 py-3 h-full flex flex-col">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2 shrink-0">
         <div>
-          <h1 className="text-2xl font-bold flex items-center gap-3 text-[#e4e4e7]">
-            <Activity size={24} className="text-indigo-400" />
+          <h1 className="text-lg font-bold flex items-center gap-2 text-[#e4e4e7]">
+            <Activity size={20} className="text-indigo-400" />
               Pipeline
           </h1>
-          <p className="text-sm mt-1 text-[#71717a]">
+          <p className="text-xs mt-0.5 text-[#71717a]">
             Trending → Telegram → DexScreener → Dedup → Persist
             {isRunning && (
               <span className="ml-2 text-indigo-400 inline-flex items-center gap-1">
@@ -226,45 +226,46 @@ export default function Pipeline() {
         </div>
       </div>
 
+      <div className="flex-1 min-h-0 overflow-y-auto">
       {isError && (
-        <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4 mb-6">
-          <p className="text-sm text-red-400 whitespace-pre-wrap line-clamp-4">{status?.detail}</p>
+        <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-3 mb-3 shrink-0">
+          <p className="text-xs text-red-400 whitespace-pre-wrap line-clamp-3">{status?.detail}</p>
         </div>
       )}
 
       {isRunning && (
-        <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-xl p-4 mb-6">
-          <div className="flex items-center gap-3 mb-3">
-            <Loader2 size={20} className="animate-spin text-indigo-400" />
+        <div className="bg-indigo-500/10 border border-indigo-500/20 rounded-xl p-3 mb-3 shrink-0">
+          <div className="flex items-center gap-2 mb-2">
+            <Loader2 size={16} className="animate-spin text-indigo-400" />
             <div className="flex-1">
-              <div className="text-sm font-semibold text-indigo-400">
+              <div className="text-xs font-semibold text-indigo-400">
                 {status?.step ? STEPS.find(s => s.key === status.step)?.label ?? status.step : 'Starting...'}
               </div>
-              <div className="text-xs text-[#71717a] mt-0.5">{status?.detail}</div>
+              <div className="text-[11px] text-[#71717a] mt-0.5">{status?.detail}</div>
             </div>
             <div className="text-right">
-              <div className="text-sm font-bold text-[#e4e4e7]">
+              <div className="text-xs font-bold text-[#e4e4e7]">
                 {status?.tokens ?? 0}{status?.total ? ` / ${status.total}` : ''}
               </div>
-              <div className="text-[10px] text-[#52525b]">{progressLabel}</div>
+              <div className="text-[9px] text-[#52525b]">{progressLabel}</div>
             </div>
           </div>
           {/* Progress bar */}
           {status?.total ? (
-            <div className="w-full h-1.5 bg-[#1e1e2e] rounded-full overflow-hidden">
+            <div className="w-full h-1 bg-[#1e1e2e] rounded-full overflow-hidden">
               <div
                 className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 rounded-full transition-all duration-500"
                 style={{ width: `${Math.min(100, ((status.tokens || 0) / status.total) * 100)}%` }}
               />
             </div>
           ) : null}
-          <div className="flex gap-1.5 mt-3">
+          <div className="flex gap-1 mt-2">
             {STEPS.map((s, i) => {
               const done = currentStep > i;
               const active = currentStep === i;
               return (
                 <div key={s.key}
-                  className={`flex-1 h-1.5 rounded-full transition-all ${
+                  className={`flex-1 h-1 rounded-full transition-all ${
                     done ? 'bg-green-500' : active ? 'bg-indigo-500 animate-pulse' : 'bg-[#1e1e2e]'
                   }`}
                   title={s.label} />
@@ -276,13 +277,13 @@ export default function Pipeline() {
 
       {/* Full-page loading overlay while refreshing */}
       {refreshing ? (
-        <div className="flex flex-col items-center justify-center py-20 gap-4">
-          <Loader2 size={36} className="animate-spin text-indigo-400" />
+        <div className="flex flex-col items-center justify-center py-16 gap-3">
+          <Loader2 size={32} className="animate-spin text-indigo-400" />
           <p className="text-sm text-[#71717a]">Refreshing pipeline data...</p>
         </div>
       ) : (
         <div>
-          <div className="grid grid-cols-3 gap-3 mb-6">
+          <div className="grid grid-cols-3 gap-3 mb-4 shrink-0">
             {[
               { icon: TrendingUp, color: 'indigo', label: 'Total Tokens Found', value: isRefreshing ? '—' : totalTokens },
               { icon: BarChart3, color: 'purple', label: 'Total Volume', value: isRefreshing ? '—' : formatCompact(tokens.reduce((sum, t) => sum + (t.windows[displayWindow as keyof typeof t.windows]?.volume ?? 0), 0)) },
@@ -292,7 +293,7 @@ export default function Pipeline() {
                 <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
                   s.color === 'indigo' ? 'bg-indigo-500/10' : s.color === 'purple' ? 'bg-purple-500/10' : 'bg-green-500/10'
                 }`}>
-                  <s.icon size={20} className={
+                  <s.icon size={18} className={
                     s.color === 'indigo' ? 'text-indigo-400' : s.color === 'purple' ? 'text-purple-400' : 'text-green-400'
                   } />
                 </div>
@@ -307,7 +308,7 @@ export default function Pipeline() {
       <h2 className="text-sm font-semibold mb-3 flex items-center gap-2 text-[#e4e4e7]">
         <Layers size={16} />Pipeline Steps
       </h2>
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 mb-8">
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 mb-4 shrink-0">
         {STEPS.map((s, i) => {
           const done = isDone || (isRunning && currentStep > i);
           const active = isRunning && currentStep === i;
@@ -318,11 +319,11 @@ export default function Pipeline() {
                 active ? 'border-indigo-500/50 bg-indigo-500/10' :
                 'border-[#1e1e2e] bg-[#13131a]'
               }`}>
-              <div className={`text-lg mb-1 ${
+              <div className={`text-base mb-1 ${
                 done ? 'text-green-400' : active ? 'text-indigo-400' : 'text-[#52525b]'
               }`}>
-                {done ? <CheckCircle size={18} className="mx-auto" /> :
-                 active ? <Loader2 size={18} className="mx-auto animate-spin" /> :
+                {done ? <CheckCircle size={16} className="mx-auto" /> :
+                 active ? <Loader2 size={16} className="mx-auto animate-spin" /> :
                  <span className="text-xs">{i + 1}</span>}
               </div>
               <div className={`text-xs font-semibold ${done ? 'text-green-400' : active ? 'text-indigo-400' : 'text-[#71717a]'}`}>
@@ -336,7 +337,7 @@ export default function Pipeline() {
 
       {tokens.length > 0 && (
         <>
-          <div className="flex items-center gap-2 mb-4">
+          <div className="flex items-center gap-2 mb-2 shrink-0">
             <span className="text-sm text-[#71717a]">Time window:</span>
             {WINDOWS.map(w => (
               <button key={w} onClick={() => setDisplayWindow(w)}
@@ -351,8 +352,8 @@ export default function Pipeline() {
           </div>
 
           <div className="bg-[#13131a] border border-[#1e1e2e] rounded-xl overflow-hidden">
-            <div className="overflow-hidden">
-              <table className="w-full table-fixed text-xs xl:text-sm">
+            <div className="overflow-x-auto">
+              <table className="w-full table-fixed text-xs">
                 <colgroup>
                   <col className="w-[5%]" />
                   <col className="w-[22%]" />
@@ -381,20 +382,20 @@ export default function Pipeline() {
                       Trades{sortIcon('trades')}
                     </th>
                     <th className="text-right px-2 py-2">
-                      <div className="flex flex-wrap justify-end gap-x-2 gap-y-1">
+                      <div className="flex flex-wrap justify-end gap-x-1.5 gap-y-0.5">
                         <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('liquidity')}>Liq{sortIcon('liquidity')}</button>
                         <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('mcap')}>MC{sortIcon('mcap')}</button>
                       </div>
                     </th>
                     <th className="text-right px-2 py-2">
-                      <div className="flex flex-wrap justify-end gap-x-2 gap-y-1">
+                      <div className="flex flex-wrap justify-end gap-x-2 gap-y-0.5">
                         <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('dex_trending')} title="DexScreener Trending Rank">DTr{sortIcon('dex_trending')}</button>
                         <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('dex_boosted')} title="DexScreener Boost Amount">DBo{sortIcon('dex_boosted')}</button>
                         <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('gmgn_trending')} title="GMGN Trending Rank">GRk{sortIcon('gmgn_trending')}</button>
                       </div>
                     </th>
                     <th className="text-right px-2 py-2">
-                      <div className="flex flex-wrap justify-end gap-x-2 gap-y-1">
+                      <div className="flex flex-wrap justify-end gap-x-2 gap-y-0.5">
                         <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('tg')}>Msg{sortIcon('tg')}</button>
                         <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('tg_users')}>Usr{sortIcon('tg_users')}</button>
                         <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('tg_groups')}>Grp{sortIcon('tg_groups')}</button>
@@ -409,18 +410,18 @@ export default function Pipeline() {
                     return (
                       <tr key={`${token.chain}:${token.token_address}`}
                         className="border-b border-[#1e1e2e] hover:bg-[#1a1a24] transition-colors">
-                        <td className="px-2 py-3">
+                        <td className="px-2 py-2">
                           <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${
                             token.rank <= 3 ? 'bg-yellow-500/20 text-yellow-400' :
                             token.rank <= 10 ? 'bg-indigo-500/20 text-indigo-400' :
                             'text-[#71717a]'
                           }`}>{token.rank}</span>
                         </td>
-                        <td className="px-2 py-3 min-w-0">
-                          <div className="font-semibold text-[#e4e4e7] truncate">
+                        <td className="px-2 py-2 min-w-0">
+                          <div className="font-semibold text-[#e4e4e7] truncate text-xs">
                             {token.symbol || token.token_address.slice(0, 8)}
                           </div>
-                          <div className="text-[10px] xl:text-xs text-[#52525b] truncate">
+                          <div className="text-[10px] text-[#52525b] truncate">
                             {token.chain}
                             {token.dex_url && (
                               <a href={token.dex_url} target="_blank" rel="noopener noreferrer" className="ml-1 inline-flex text-indigo-400 hover:text-indigo-300">
@@ -429,15 +430,15 @@ export default function Pipeline() {
                             )}
                           </div>
                         </td>
-                        <td className="px-2 py-3 text-right font-mono text-[#e4e4e7] truncate">${formatCompact(w.price)}</td>
-                        <td className="px-2 py-3 text-right font-mono text-[#e4e4e7] truncate">${formatCompact(w.volume)}</td>
-                        <td className="px-2 py-3 text-right font-mono text-[#71717a] truncate">{formatCompact(w.trades)}</td>
-                        <td className="px-2 py-3 text-right font-mono text-[#71717a] tabular-nums">
+                        <td className="px-2 py-2 text-right font-mono text-[#e4e4e7] truncate text-xs">${formatCompact(w.price)}</td>
+                        <td className="px-2 py-2 text-right font-mono text-[#e4e4e7] truncate text-xs">${formatCompact(w.volume)}</td>
+                        <td className="px-2 py-2 text-right font-mono text-[#71717a] truncate text-xs">{formatCompact(w.trades)}</td>
+                        <td className="px-2 py-2 text-right font-mono text-[#71717a] tabular-nums text-xs">
                           <div className="truncate">${formatCompact(w.liquidity)}</div>
                           <div className="text-[10px] text-[#52525b] truncate">${formatCompact(w.market_cap)}</div>
                         </td>
-                        <td className="px-2 py-3 text-right font-mono tabular-nums">
-                          <div className="flex flex-wrap justify-end gap-x-2 gap-y-1">
+                        <td className="px-2 py-2 text-right font-mono tabular-nums text-xs">
+                          <div className="flex flex-wrap justify-end gap-x-2 gap-y-0.5">
                             <span className={token.is_dexscreener_trending ? 'text-green-400' : 'text-[#3f3f46]'} title="DexScreener Trending Rank">
                               D{token.dexscreener_trending_rank ?? '—'}
                             </span>
@@ -449,8 +450,8 @@ export default function Pipeline() {
                             </span>
                           </div>
                         </td>
-                        <td className="px-2 py-3 text-right font-mono tabular-nums">
-                          <div className="flex flex-wrap justify-end gap-x-2 gap-y-1">
+                        <td className="px-2 py-2 text-right font-mono tabular-nums text-xs">
+                          <div className="flex flex-wrap justify-end gap-x-2 gap-y-0.5">
                             <span className="text-[#e4e4e7]" title="Mentions">M{tg.mentions}</span>
                             <span className="text-[#71717a]" title="Replies">R{tg.replies ?? 0}</span>
                             <span className="text-[#71717a]" title="Users">U{tg.users ?? 0}</span>
@@ -469,7 +470,7 @@ export default function Pipeline() {
               </table>
             </div>
           </div>
-          <div className="flex items-center justify-between mt-3 text-xs text-[#52525b]">
+          <div className="flex items-center justify-between mt-3 text-xs text-[#52525b] shrink-0">
             <span>
               Showing {pagedTokens.length > 0 ? page * PAGE_SIZE + 1 : 0}–{Math.min((page + 1) * PAGE_SIZE, displayTokens.length)} of {displayTokens.length} tokens
               {displayTokens.length < totalTokens && ` (${totalTokens} total in DB)`}
@@ -524,22 +525,23 @@ export default function Pipeline() {
       )}
 
       {!isRunning && tokens.length === 0 && !isError && (
-        <div className="bg-[#13131a] border border-[#1e1e2e] rounded-xl p-12 text-center">
-          <div className="w-16 h-16 rounded-full bg-indigo-500/10 flex items-center justify-center mx-auto mb-4">
-            <Play size={24} className="text-indigo-400" />
+        <div className="bg-[#13131a] border border-[#1e1e2e] rounded-xl p-10 text-center">
+          <div className="w-14 h-14 rounded-full bg-indigo-500/10 flex items-center justify-center mx-auto mb-3">
+            <Play size={20} className="text-indigo-400" />
           </div>
-          <h3 className="text-lg font-semibold text-[#e4e4e7] mb-2">No Pipeline Data Yet</h3>
-          <p className="text-sm text-[#71717a] mb-4 max-w-md mx-auto">
+          <h3 className="text-base font-semibold text-[#e4e4e7] mb-1.5">No Pipeline Data Yet</h3>
+          <p className="text-xs text-[#71717a] mb-3 max-w-md mx-auto">
             Run the unified pipeline to scan Telegram groups, enrich tokens via DexScreener & GMGN, and rank them.
           </p>
           <button onClick={handleRun}
-            className="px-5 py-2 rounded-lg text-sm font-semibold bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/20">
+            className="px-4 py-1.5 rounded-lg text-xs font-semibold bg-gradient-to-r from-indigo-500 to-purple-500 text-white shadow-lg shadow-indigo-500/20">
             Run Pipeline
           </button>
         </div>
       )}
         </div>
       )}
+      </div>
     </div>
   );
 }

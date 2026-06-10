@@ -426,7 +426,7 @@ export const twitterApi = {
 };
 
 // ── GMGN API ─────────────────────────────────────────────────────────
-import type { GMGNDiscoveryResponse, GMGNStats } from './gmgn';
+import type { GMGNDiscoveryResponse, GMGNKOLClustersResponse, GMGNStats } from './gmgn';
 
 export const gmgnApi = {
   getDiscovery: (params?: { window?: string; limit?: number }) => {
@@ -434,6 +434,14 @@ export const gmgnApi = {
     if (params?.window) sp.set('window', params.window);
     if (params?.limit) sp.set('limit', String(params.limit));
     return fetchJSON<GMGNDiscoveryResponse>(`/gmgn/discovery${sp.toString() ? `?${sp}` : ''}`);
+  },
+  getKOLClusters: (params?: { chain?: string; window?: string; limit?: number; min_buyers?: number }) => {
+    const sp = new URLSearchParams();
+    if (params?.chain) sp.set('chain', params.chain);
+    if (params?.window) sp.set('window', params.window);
+    if (params?.limit) sp.set('limit', String(params.limit));
+    if (params?.min_buyers) sp.set('min_buyers', String(params.min_buyers));
+    return fetchJSON<GMGNKOLClustersResponse>(`/gmgn/kol-clusters${sp.toString() ? `?${sp}` : ''}`);
   },
   getStats: () => fetchJSON<GMGNStats>('/gmgn/discovery/stats'),
   triggerCollect: () => fetchJSON<{ status: string }>('/gmgn/collect', { method: 'POST' }),

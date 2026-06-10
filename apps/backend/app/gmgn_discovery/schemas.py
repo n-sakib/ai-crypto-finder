@@ -85,3 +85,50 @@ class GMGNStats(BaseModel):
     total_tokens: int
     latest_token_at: Optional[datetime] = None
     generated_at: datetime
+
+
+class GMGNKOLWallet(BaseModel):
+    """Aggregated KOL wallet activity for one token."""
+    maker: str
+    twitter_username: Optional[str] = None
+    twitter_name: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
+    amount_usd: float = 0
+    buy_count: int = 0
+    last_buy_at: datetime
+
+
+class GMGNKOLTrade(BaseModel):
+    """Single KOL buy trade included in a co-buy cluster."""
+    transaction_hash: Optional[str] = None
+    maker: str
+    twitter_username: Optional[str] = None
+    twitter_name: Optional[str] = None
+    amount_usd: float = 0
+    price_usd: Optional[float] = None
+    bought_at: datetime
+
+
+class GMGNKOLCluster(BaseModel):
+    """Token bought by one or more KOL wallets in the selected window."""
+    token_address: str
+    symbol: Optional[str] = None
+    name: Optional[str] = None
+    logo: Optional[str] = None
+    launchpad: Optional[str] = None
+    kol_count: int
+    buy_count: int
+    total_amount_usd: float
+    last_buy_at: datetime
+    kol_wallets: list[GMGNKOLWallet]
+    trades: list[GMGNKOLTrade]
+
+
+class GMGNKOLClustersResponse(BaseModel):
+    """Grouped KOL co-buy response."""
+    chain: str
+    window: str
+    generated_at: datetime
+    total_trades: int
+    total_buy_trades: int
+    clusters: list[GMGNKOLCluster]

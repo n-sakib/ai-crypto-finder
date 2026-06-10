@@ -40,10 +40,10 @@ export default function DexScreenerDiscovery() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="px-2 py-3 space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-[#e4e4e7] flex items-center gap-2">
+          <h1 className="text-lg font-bold text-[#e4e4e7] flex items-center gap-2">
             <Zap size={20} className="text-cyan-400" />
             DexScreener Discovery
           </h1>

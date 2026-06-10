@@ -2,12 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
+html, body, #root {
   margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
   font-family: 'Inter', sans-serif;
   background: #0a0a0f;
   color: #e4e4e7;
-  min-height: 100vh;
   -webkit-font-smoothing: antialiased;
 }
 

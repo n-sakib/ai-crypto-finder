@@ -18,16 +18,16 @@ export default function TokenDetail() {
   if (!token) return <div className="max-w-4xl mx-auto px-4 py-20 text-center"><p className="text-lg text-[#e4e4e7]">Token not found</p><Link to="/" className="text-sm mt-2 inline-block text-indigo-400">← Back</Link></div>;
 
   return (
-    <div className="max-w-5xl mx-auto px-4 py-6">
-      <Link to="/" className="inline-flex items-center gap-2 text-sm mb-6 no-underline hover:opacity-80 text-[#71717a]"><ArrowLeft size={14}/> Back to Dashboard</Link>
+    <div className="px-2 py-3">
+      <Link to="/" className="inline-flex items-center gap-2 text-xs mb-3 no-underline hover:opacity-80 text-[#71717a]"><ArrowLeft size={12}/> Back to Dashboard</Link>
 
-      <div className="bg-[#13131a] border border-[#1e1e2e] rounded-xl p-6 mb-6">
+      <div className="bg-[#13131a] border border-[#1e1e2e] rounded-xl p-4 mb-4">
         <div className="flex items-start justify-between flex-wrap gap-4">
           <div className="flex items-start gap-4">
             <MomentumBadge score={token.early_momentum_score}/>
             <div>
               <div className="flex items-center gap-3 flex-wrap">
-                <h1 className="text-2xl font-bold text-[#e4e4e7]">{token.symbol}</h1>
+                <h1 className="text-lg font-bold text-[#e4e4e7]">{token.symbol}</h1>
                 <TierBadge tier={token.tier} risk={token.risk_level}/>
                 {token.is_approved && <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold uppercase bg-green-500/10 text-green-500 border border-green-500/20"><CheckCircle size={12}/> Approved</span>}
               </div>
@@ -46,7 +46,7 @@ export default function TokenDetail() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="lg:col-span-2 space-y-6">
           <div className="bg-[#13131a] border border-[#1e1e2e] rounded-xl p-5">
             <h2 className="text-sm font-semibold mb-4 flex items-center gap-2 text-[#e4e4e7]"><Activity size={16}/> Score Breakdown</h2>
