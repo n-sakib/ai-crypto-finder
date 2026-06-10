@@ -391,6 +391,11 @@ class UnifiedToken(Base):
     gmgn_url = Column(String(512), nullable=True)
     gmgn_score = Column(Float, nullable=True)
     gmgn_hot_level = Column(Integer, nullable=True)
+    gmgn_kol_count = Column(Integer, default=0)
+    gmgn_kol_buy_count = Column(Integer, default=0)
+    gmgn_kol_total_amount_usd = Column(Float, default=0.0)
+    gmgn_kol_last_buy_at = Column(DateTime(timezone=True), nullable=True)
+    gmgn_kol_wallets = Column(JSON, default=list)
 
     # ── 5-minute window ──
     price_5m = Column(Float, nullable=True)

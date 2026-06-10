@@ -99,6 +99,13 @@ class GMGNClient:
 
     async def fetch_kol_trades(self, chain: str = "sol", limit: int = 200) -> list[dict]:
         """Fetch GMGN renowned/KOL trade feed from the authenticated OpenAPI route."""
+        return await self._fetch_user_trade_feed("/v1/user/kol", chain=chain, limit=limit)
+
+    async def fetch_smartmoney_trades(self, chain: str = "sol", limit: int = 200) -> list[dict]:
+        """Fetch GMGN smart money / whale trade feed from the authenticated OpenAPI route."""
+        return await self._fetch_user_trade_feed("/v1/user/smartmoney", chain=chain, limit=limit)
+
+    async def _fetch_user_trade_feed(self, path: str, chain: str = "sol", limit: int = 200) -> list[dict]:
         if not settings.GMGN_API_KEY:
             raise RuntimeError("GMGN_API_KEY is not configured")
 
@@ -113,7 +120,7 @@ class GMGNClient:
             "Accept": "application/json",
         }
         async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-            resp = await client.get(f"{GMGN_OPENAPI_BASE_URL}/v1/user/kol", params=params, headers=headers)
+            resp = await client.get(f"{GMGN_OPENAPI_BASE_URL}{path}", params=params, headers=headers)
             if resp.status_code == 429:
                 reset = resp.headers.get("X-RateLimit-Reset")
                 raise httpx.HTTPStatusError(

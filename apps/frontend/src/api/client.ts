@@ -116,6 +116,21 @@ export interface UnifiedTokenData {
   dexscreener_boost_amount?: number | null;
   dexscreener_boost_total?: number | null;
   gmgn_trending_rank?: number | null;
+  gmgn_kol_count?: number;
+  gmgn_kol_buy_count?: number;
+  gmgn_kol_total_amount_usd?: number;
+  gmgn_kol_last_buy_at?: string | null;
+  gmgn_kol_wallets?: Array<{
+    maker: string;
+    source?: string;
+    source_label?: string;
+    twitter_username?: string | null;
+    twitter_name?: string | null;
+    tags?: string[];
+    amount_usd: number;
+    buy_count: number;
+    last_buy_at: string;
+  }>;
   windows: {
     '5m'?: UnifiedWindowData;
     '1h'?: UnifiedWindowData;

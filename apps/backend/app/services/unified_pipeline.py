@@ -38,6 +38,16 @@ GMGN_ENRICHMENT_LIMITS = {
     "6h": 100,
     "24h": 150,
 }
+GMGN_KOL_LIMIT = 200
+GMGN_KOL_WINDOWS = {
+    "5m": timedelta(minutes=5),
+    "1h": timedelta(hours=1),
+    "6h": timedelta(hours=6),
+    "24h": timedelta(hours=24),
+}
+GMGN_NATIVE_TOKEN_ADDRESSES = {
+    "sol": {"So11111111111111111111111111111111111111112"},
+}
 DEXSCREENER_REQUESTS_PER_MINUTE = 240  # Official token/search limit is 300 rpm; keep headroom.
 DEXSCREENER_MAX_CONCURRENCY = 8
 DEXSCREENER_SEARCH_FALLBACK_LIMIT_PER_CHAIN = 50
@@ -192,8 +202,18 @@ class UnifiedPipeline:
                 f"Dex matched:{dex_matched} checked:{total}/{total} ✓",
                 dex_matched, total)
 
-        # ── Step 3: Dedup ──────────────────────────────────────────────
-        logger.info("Step 3: Dedup...")
+        # ── Step 4: GMGN KOL / Smart Money buys ────────────────────────
+        logger.info("Step 4: GMGN KOL/Smart Money wallet check...")
+        if status_callback:
+            status_callback("gmgn_kol", "Checking GMGN KOL & Smart Money buys...", 0, total)
+        await self._check_gmgn_kol_buys(tg_tokens, window=window, progress_cb=status_callback)
+        kol_matched = sum(1 for t in tg_tokens if (t.get("gmgn_kol_count") or 0) > 0)
+        logger.info("  GMGN KOL/Smart Money wallet check complete: %d/%d tokens matched", kol_matched, total)
+        if status_callback:
+            status_callback("gmgn_kol", f"KOL/Smart Money buys found for {kol_matched} tokens", kol_matched, total)
+
+        # ── Step 5: Dedup ──────────────────────────────────────────────
+        logger.info("Step 5: Dedup...")
         if status_callback:
             status_callback("dedup", f"Deduplicating {total} tokens...", total, total)
         deduped = self._dedup(tg_tokens)
@@ -206,8 +226,8 @@ class UnifiedPipeline:
         if status_callback:
             status_callback("dedup", f"{len(deduped)} tokens (removed {before_clean - len(deduped)} unenriched)", len(deduped), total)
 
-        # ── Step 4: Windowed Aggregation ───────────────────────────────
-        logger.info("Step 4: Windowed aggregation (%s)...", window)
+        # ── Step 6: Windowed Aggregation ───────────────────────────────
+        logger.info("Step 6: Windowed aggregation (%s)...", window)
         if status_callback:
             status_callback("aggregate", f"Computing {window} window metrics for {len(deduped)} tokens...", len(deduped), total)
         for token in deduped:
@@ -215,8 +235,8 @@ class UnifiedPipeline:
         if status_callback:
             status_callback("aggregate", f"Windowed aggregation complete ({window})", len(deduped), total)
 
-        # ── Step 5: Persist ────────────────────────────────────────────
-        logger.info("Step 5: Persisting...")
+        # ── Step 7: Persist ────────────────────────────────────────────
+        logger.info("Step 7: Persisting...")
         if status_callback:
             status_callback("persist", f"Saving {len(deduped)} tokens to database...", len(deduped), total)
         count = await self._persist(session, deduped, now)
@@ -596,6 +616,164 @@ class UnifiedPipeline:
                     for token in unmatched[:DEXSCREENER_SEARCH_FALLBACK_LIMIT_PER_CHAIN]
                 ])
 
+    # ── Step 4: GMGN KOL / Smart Money buy check ───────────────────────
+
+    async def _check_gmgn_kol_buys(self, tokens: list[dict], window: str = "24h", progress_cb=None) -> None:
+        """Annotate Solana tokens bought by GMGN's KOL and Smart Money feeds."""
+        if not settings.GMGN_API_KEY:
+            logger.info("  GMGN KOL/Smart Money wallet check skipped: no API key")
+            return
+
+        solana_tokens = [
+            t for t in tokens
+            if t.get("token_address") and t.get("chain", "solana") in ("solana", "sol")
+        ]
+        if not solana_tokens:
+            return
+
+        from app.gmgn_discovery.client import GMGNClient
+
+        client = GMGNClient()
+        try:
+            feeds = await asyncio.gather(
+                client.fetch_kol_trades(chain="sol", limit=GMGN_KOL_LIMIT),
+                client.fetch_smartmoney_trades(chain="sol", limit=GMGN_KOL_LIMIT),
+                return_exceptions=True,
+            )
+        except Exception as e:
+            logger.warning("GMGN KOL/Smart Money wallet check failed: %s", e)
+            return
+        finally:
+            await client.close()
+
+        trades: list[dict] = []
+        feed_errors = 0
+        for source, result in (("kol", feeds[0]), ("smartmoney", feeds[1])):
+            if isinstance(result, Exception):
+                feed_errors += 1
+                logger.warning("GMGN %s wallet feed failed: %s", source, result)
+                continue
+            for trade in result:
+                if isinstance(trade, dict):
+                    trades.append({**trade, "_gmgn_wallet_source": source})
+        if feed_errors == 2:
+            return
+
+        cutoff = datetime.now(timezone.utc) - GMGN_KOL_WINDOWS.get(window, timedelta(hours=24))
+        native_addresses = GMGN_NATIVE_TOKEN_ADDRESSES["sol"]
+        tokens_by_addr: dict[str, list[dict]] = {}
+        for token in solana_tokens:
+            tokens_by_addr.setdefault(token["token_address"], []).append(token)
+        matched_addresses: set[str] = set()
+
+        for raw in trades:
+            if str(raw.get("side", "")).lower() != "buy":
+                continue
+
+            bought_at = self._gmgn_trade_time(raw)
+            if not bought_at or bought_at < cutoff:
+                continue
+
+            token_address = (
+                raw.get("base_address")
+                or raw.get("token_address")
+                or raw.get("address")
+            )
+            if not token_address or token_address in native_addresses:
+                continue
+
+            matched_tokens = tokens_by_addr.get(token_address)
+            if not matched_tokens:
+                continue
+
+            maker = raw.get("maker") or raw.get("wallet_address") or raw.get("address_owner")
+            if not maker:
+                continue
+
+            maker_info = raw.get("maker_info") or {}
+            source = raw.get("_gmgn_wallet_source") or "tracked"
+            source_label = "Smart Money" if source == "smartmoney" else "KOL"
+            amount_usd = self._as_float(raw.get("amount_usd"))
+            token = matched_tokens[0]
+            wallet_map = token.setdefault("_gmgn_kol_wallet_map", {})
+            wallet_key = f"{source}:{maker}"
+            wallet = wallet_map.setdefault(
+                wallet_key,
+                {
+                    "maker": maker,
+                    "source": source,
+                    "source_label": source_label,
+                    "twitter_username": maker_info.get("twitter_username"),
+                    "twitter_name": maker_info.get("twitter_name"),
+                    "tags": maker_info.get("tags") or [],
+                    "amount_usd": 0.0,
+                    "buy_count": 0,
+                    "last_buy_at": bought_at,
+                },
+            )
+            wallet["amount_usd"] += amount_usd
+            wallet["buy_count"] += 1
+            wallet["last_buy_at"] = max(wallet["last_buy_at"], bought_at)
+
+            token["gmgn_kol_buy_count"] = (token.get("gmgn_kol_buy_count") or 0) + 1
+            token["gmgn_kol_total_amount_usd"] = (token.get("gmgn_kol_total_amount_usd") or 0.0) + amount_usd
+            token["gmgn_kol_last_buy_at"] = max(token.get("gmgn_kol_last_buy_at") or bought_at, bought_at)
+            matched_addresses.add(token_address)
+
+        for addr in matched_addresses:
+            token = tokens_by_addr[addr][0]
+            wallets = sorted(
+                token.pop("_gmgn_kol_wallet_map", {}).values(),
+                key=lambda wallet: (wallet["amount_usd"], wallet["last_buy_at"]),
+                reverse=True,
+            )
+            token["gmgn_kol_count"] = len(wallets)
+            token["gmgn_kol_total_amount_usd"] = round(token.get("gmgn_kol_total_amount_usd") or 0.0, 2)
+            token["gmgn_kol_wallets"] = [
+                {
+                    **wallet,
+                    "amount_usd": round(wallet["amount_usd"], 2),
+                    "last_buy_at": wallet["last_buy_at"].isoformat(),
+                }
+                for wallet in wallets[:10]
+            ]
+            sources = {wallet.get("source") for wallet in wallets}
+            methods = []
+            groups = []
+            if "kol" in sources:
+                methods.append("gmgn_kol_buy")
+                groups.append("gmgn_kol_buy")
+            if "smartmoney" in sources:
+                methods.append("gmgn_smartmoney_buy")
+                groups.append("gmgn_smartmoney_buy")
+            for method in methods:
+                self._merge_list_field(token, "discovery_methods", [method])
+            for group in groups:
+                self._merge_list_field(token, "source_groups", [group])
+
+        if progress_cb:
+            progress_cb("gmgn_kol", f"Checked {len(trades)} GMGN KOL/Smart Money trades", len(matched_addresses), len(solana_tokens))
+
+    @staticmethod
+    def _as_float(value) -> float:
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _gmgn_trade_time(raw: dict) -> datetime | None:
+        timestamp = raw.get("timestamp")
+        if timestamp is None:
+            return None
+        try:
+            value = int(timestamp)
+            if value > 10_000_000_000:
+                value = value // 1000
+            return datetime.fromtimestamp(value, timezone.utc)
+        except (TypeError, ValueError, OSError):
+            return None
+
     # ── Step 3: GMGN ───────────────────────────────────────────────────
 
     async def _enrich_gmgn(self, tokens: list[dict], progress_cb=None, should_stop=None, window: str = "24h"):
@@ -725,10 +903,23 @@ class UnifiedPipeline:
 
         for field in (
             "symbol", "name", "dex_url", "pair_address", "dex_id",
-            "gmgn_score", "gmgn_hot_level",
+            "gmgn_score", "gmgn_hot_level", "gmgn_kol_last_buy_at",
         ):
             if incoming.get(field) is not None and existing.get(field) is None:
                 existing[field] = incoming[field]
+
+        existing["gmgn_kol_count"] = max(existing.get("gmgn_kol_count", 0) or 0, incoming.get("gmgn_kol_count", 0) or 0)
+        existing["gmgn_kol_buy_count"] = (existing.get("gmgn_kol_buy_count", 0) or 0) + (incoming.get("gmgn_kol_buy_count", 0) or 0)
+        existing["gmgn_kol_total_amount_usd"] = (existing.get("gmgn_kol_total_amount_usd", 0.0) or 0.0) + (incoming.get("gmgn_kol_total_amount_usd", 0.0) or 0.0)
+        if incoming.get("gmgn_kol_last_buy_at") is not None:
+            existing["gmgn_kol_last_buy_at"] = max(
+                existing.get("gmgn_kol_last_buy_at") or incoming["gmgn_kol_last_buy_at"],
+                incoming["gmgn_kol_last_buy_at"],
+            )
+        for wallet in incoming.get("gmgn_kol_wallets", []) or []:
+            wallets = existing.setdefault("gmgn_kol_wallets", [])
+            if not any(w.get("maker") == wallet.get("maker") for w in wallets):
+                wallets.append(wallet)
 
         existing["tg_mentions"] = existing.get("tg_mentions", 0) + incoming.get("tg_mentions", 0)
         existing["group_count"] = max(existing.get("group_count", 0), incoming.get("group_count", 0))
@@ -1162,6 +1353,11 @@ class UnifiedPipeline:
                     "dexscreener_boost_amount": t.get("dexscreener_boost_amount"),
                     "dexscreener_boost_total": t.get("dexscreener_boost_total"),
                     "gmgn_trending_rank": t.get("gmgn_trending_rank"),
+                    "gmgn_kol_count": t.get("gmgn_kol_count", 0) or 0,
+                    "gmgn_kol_buy_count": t.get("gmgn_kol_buy_count", 0) or 0,
+                    "gmgn_kol_total_amount_usd": t.get("gmgn_kol_total_amount_usd", 0.0) or 0.0,
+                    "gmgn_kol_last_buy_at": t.get("gmgn_kol_last_buy_at"),
+                    "gmgn_kol_wallets": t.get("gmgn_kol_wallets", []),
                     "group_count": t.get("group_count", 0),
                     "source_groups": t.get("source_groups", []),
                     "discovery_methods": t.get("discovery_methods", []),

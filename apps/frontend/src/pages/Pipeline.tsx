@@ -10,6 +10,7 @@ const STEPS = [
   { key: 'telegram', label: 'Telegram Scan', desc: 'Scan groups for token mentions' },
   { key: 'trending', label: 'Trending Fetch', desc: 'DexScreener boosted + GMGN trending' },
   { key: 'dexscreener', label: 'DexScreener', desc: 'Enrich price, volume, liquidity, and pair data' },
+  { key: 'gmgn_kol', label: 'GMGN Wallets', desc: 'Check KOL and Smart Money buys' },
   { key: 'dedup', label: 'Deduplication', desc: 'Merge duplicate tokens' },
   { key: 'aggregate', label: 'Windowed Agg', desc: 'Compute 5m/1h/6h/24h buckets' },
   { key: 'persist', label: 'Persist', desc: 'Save to database' },
@@ -145,6 +146,7 @@ export default function Pipeline() {
         case 'dex_trending': valA = a.dexscreener_trending_rank ?? 9999; valB = b.dexscreener_trending_rank ?? 9999; break;
         case 'dex_boosted': valA = a.dexscreener_boost_amount ?? 0; valB = b.dexscreener_boost_amount ?? 0; break;
         case 'gmgn_trending': valA = a.gmgn_trending_rank ?? 9999; valB = b.gmgn_trending_rank ?? 9999; break;
+        case 'gmgn_kol': valA = a.gmgn_kol_count ?? 0; valB = b.gmgn_kol_count ?? 0; break;
         case 'tg': valA = tgA.mentions; valB = tgB.mentions; break;
         case 'tg_replies': valA = tgA.replies ?? 0; valB = tgB.replies ?? 0; break;
         case 'tg_users': valA = tgA.users ?? 0; valB = tgB.users ?? 0; break;
@@ -167,7 +169,7 @@ export default function Pipeline() {
               Pipeline
           </h1>
           <p className="text-xs mt-0.5 text-[#71717a]">
-            Trending → Telegram → DexScreener → Dedup → Persist
+            Trending → Telegram → DexScreener → GMGN Wallets → Dedup → Persist
             {isRunning && (
               <span className="ml-2 text-indigo-400 inline-flex items-center gap-1">
                 <Loader2 size={12} className="animate-spin" />Running...
@@ -392,6 +394,7 @@ export default function Pipeline() {
                         <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('dex_trending')} title="DexScreener Trending Rank">DTr{sortIcon('dex_trending')}</button>
                         <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('dex_boosted')} title="DexScreener Boost Amount">DBo{sortIcon('dex_boosted')}</button>
                         <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('gmgn_trending')} title="GMGN Trending Rank">GRk{sortIcon('gmgn_trending')}</button>
+                        <button className="hover:text-[#e4e4e7]" onClick={() => handleSort('gmgn_kol')} title="GMGN KOL/Smart Money buyer count">KOL{sortIcon('gmgn_kol')}</button>
                       </div>
                     </th>
                     <th className="text-right px-2 py-2">
@@ -447,6 +450,17 @@ export default function Pipeline() {
                             </span>
                             <span className={token.is_gmgn_trending ? 'text-purple-400' : 'text-[#3f3f46]'} title="GMGN Trending Rank">
                               G{token.gmgn_trending_rank ?? '—'}
+                            </span>
+                            <span
+                              className={(token.gmgn_kol_count ?? 0) > 0 ? 'text-cyan-400' : 'text-[#3f3f46]'}
+                              title={(token.gmgn_kol_wallets ?? []).length > 0
+                                ? `GMGN wallets: ${(token.gmgn_kol_wallets ?? [])
+                                    .slice(0, 3)
+                                    .map(wallet => `${wallet.source_label || 'Wallet'}:${wallet.twitter_username || wallet.twitter_name || wallet.maker.slice(0, 6)}`)
+                                    .join(', ')}`
+                                : 'GMGN KOL/Smart Money buyer count'}
+                            >
+                              K{token.gmgn_kol_count ?? 0}
                             </span>
                           </div>
                         </td>
